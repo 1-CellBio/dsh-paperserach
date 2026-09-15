@@ -57,12 +57,14 @@
       "platform": "web",
       "inject": [
         "@deepseek-ai/dsh-client-locale",
-        "@deepseek-ai/dsh-client-ui-settings"
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-tool"
       ]
     }
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": ">=0.1.0-rc.5 || >=4.0.0-rc.0",
+    "@deepseek-ai/dsh-client-ui-tool": ">=0.1.0-rc.5",
     "@deepseek-ai/dsh-credentials": ">=0.1.0-rc.5",
     "@deepseek-ai/dsh-settings": ">=0.1.0-rc.5",
     "@deepseek-ai/dsh-system-prompt": ">=0.1.0-rc.5",
@@ -71,6 +73,7 @@
     "react": "^18.2.0"
   },
   "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-client-ui-tool": { "optional": true },
     "@deepseek-ai/dsh-credentials": { "optional": true },
     "@deepseek-ai/dsh-settings": { "optional": true },
     "react": { "optional": true }

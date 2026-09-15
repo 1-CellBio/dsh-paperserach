@@ -3,6 +3,7 @@
 import type {} from "@deepseek-ai/dsh-api-remotes/client";
 import type { ClientRemote } from "@deepseek-ai/dsh-api-remotes/client";
 import { PapersearchSettingsCard } from "./SettingsCard.tsx";
+import { SearchCard } from "./SearchCard.tsx";
 import { PapersearchSettingsController } from "./settings-controller.ts";
 import type { PapersearchSettingsScope } from "./settings-form.ts";
 import { NS, en, zh } from "./locales.ts";
@@ -54,6 +55,17 @@ export function apply(ctx: ClientApplyContext): void {
         inject: () => ctrl.inject(),
       },
       PapersearchSettingsCard,
+    );
+  });
+
+  // Chat-inline citation card for the search tool. The key domain of
+  // 'tool.call.toolview' is open to any wire tool name (registering is
+  // additive for our own tool); dsh.client.inject lists dsh-client-ui-tool
+  // so the slot is declared before this entry registers.
+  ctx.slots.inject("tool.call.toolview", function* () {
+    yield ctx.slots.register(
+      { name: "tool.call.toolview", key: "papersearch_search", locale: NS },
+      SearchCard,
     );
   });
 }

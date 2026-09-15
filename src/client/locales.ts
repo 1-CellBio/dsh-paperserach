@@ -44,7 +44,15 @@ export type PapersearchLocaleKey =
   | "settings.keyNotConfigured"
   | "settings.keyWriteHint"
   | "settings.keyClear"
-  | "settings.keyClearStaged";
+  | "settings.keyClearStaged"
+  | "search.title"
+  | "search.searching"
+  | "search.truncated"
+  | "search.pdf"
+  | "search.doi"
+  | "search.failed"
+  | "search.stopped"
+  | "search.stoppedDetail";
 
 export const zh: Record<PapersearchLocaleKey, string> = {
   "settings.title": "Paper Search 源密钥",
@@ -91,6 +99,14 @@ export const zh: Record<PapersearchLocaleKey, string> = {
   "settings.keyWriteHint": "值不回显：留空保持不变，输入并保存即写入主机凭据存储",
   "settings.keyClear": "清除",
   "settings.keyClearStaged": "将清除",
+  "search.title": "文献检索",
+  "search.searching": "正在检索文献…",
+  "search.truncated": "命中结果超过上限，列表已截断",
+  "search.pdf": "PDF",
+  "search.doi": "DOI",
+  "search.failed": "检索失败",
+  "search.stopped": "检索已中断",
+  "search.stoppedDetail": "工具调用被中断，未返回检索结果",
 };
 
 export const en: Record<PapersearchLocaleKey, string> = {
@@ -138,4 +154,12 @@ export const en: Record<PapersearchLocaleKey, string> = {
   "settings.keyWriteHint": "Write-only: leave blank to keep; saving a value writes it to the Host credential store",
   "settings.keyClear": "Clear",
   "settings.keyClearStaged": "will be cleared",
+  "search.title": "Paper search",
+  "search.searching": "Searching papers…",
+  "search.truncated": "Results exceeded the cap; the list was truncated",
+  "search.pdf": "PDF",
+  "search.doi": "DOI",
+  "search.failed": "Search failed",
+  "search.stopped": "Search interrupted",
+  "search.stoppedDetail": "The tool call was interrupted before results returned",
 };

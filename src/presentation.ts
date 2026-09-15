@@ -1,4 +1,4 @@
-import type { ToolResult, WebSearchResultView, WebSource } from "@deepseek-ai/dsh-tools";
+import type { ToolResult, WebSearchResultView } from "@deepseek-ai/dsh-tools";
 import type { JsonValue } from "@deepseek-ai/dsh-util-values";
 import type { CompactPaper } from "./paper";
 
@@ -11,18 +11,39 @@ import type { CompactPaper } from "./paper";
  * fall back to the generic card.
  */
 
-/** One paper card's citation-line fields, projected from {@link CompactPaper}.
- *  A type-literal return (not the `WebSource` interface) so the result is
- *  assignable to `JsonValue`, which the persisted meta payload requires. */
-function sourceOf(paper: CompactPaper): { url: string; title: string; snippet: string } {
+/**
+ * One paper card's citation-line fields, projected from {@link CompactPaper}
+ * into the persisted meta. A type literal (not the `WebSource` interface) so
+ * the projected meta stays assignable to `JsonValue`, which the persisted
+ * meta payload requires. `pdfUrl` and `doi` ride alongside the
+ * fallback-chained `url` so a client card can offer PDF and DOI chips even
+ * when the citation links the landing page; both are omitted when the paper
+ * reports none.
+ */
+export type SearchMetaSource = {
+  /** Citation link: landing page, else PDF, else the DOI resolver. */
+  url: string
+  title: string
+  snippet: string
+  /** Direct PDF link, when the source reported one. */
+  pdfUrl?: string
+  /** Bare DOI (not a `https://doi.org` URL), when known. */
+  doi?: string
+}
+
+/** Project one {@link CompactPaper} into its persisted citation-line source. */
+function sourceOf(paper: CompactPaper): SearchMetaSource {
   const url = paper.url || paper.pdfUrl || (paper.doi ? `https://doi.org/${paper.doi}` : "");
   const tag = [paper.source, paper.year].filter(Boolean).join(" ");
   const citations = paper.citations > 0 ? ` · ${paper.citations} citations` : "";
-  return {
+  const source: SearchMetaSource = {
     url,
     title: paper.title,
     snippet: `${tag}${paper.authors ? ` — ${paper.authors}` : ""}${citations}`,
   };
+  if (paper.pdfUrl) source.pdfUrl = paper.pdfUrl;
+  if (paper.doi) source.doi = paper.doi;
+  return source;
 }
 
 /** Whether `value` is a {@link CompactPaper} (defensive narrowing from the opaque result value). */
@@ -60,31 +81,35 @@ export function searchMetaFromValue(value: JsonValue): JsonValue {
 }
 
 /** The `meta` payload {@link presentSearchResult} narrows back into the view. */
-interface SearchMeta {
-  sources: WebSource[]
+export interface SearchMeta {
+  sources: SearchMetaSource[]
   truncated: boolean
 }
 
-/** Whether `value` is a valid {@link WebSource} (defensive narrowing from opaque `meta`). */
-function isWebSource(value: unknown): value is WebSource {
+/** Whether `value` is a valid {@link SearchMetaSource} (defensive narrowing from opaque `meta`). */
+function isMetaSource(value: unknown): value is SearchMetaSource {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false
   const source = value as Record<string, unknown>
   return typeof source.url === "string"
     && (source.title === undefined || typeof source.title === "string")
     && (source.snippet === undefined || typeof source.snippet === "string")
+    && (source.pdfUrl === undefined || typeof source.pdfUrl === "string")
+    && (source.doi === undefined || typeof source.doi === "string")
 }
 
 /**
  * Narrow opaque live or replayed result metadata to {@link SearchMeta};
  * malformed metadata returns `undefined` so presentation falls back to the
- * generic card instead of throwing during replay.
+ * generic card instead of throwing during replay. Sources may carry the
+ * optional `pdfUrl`/`doi` fields; meta logged before those fields existed
+ * narrows unchanged.
  * @param meta - result metadata.
  * @returns the validated meta, or `undefined` for absent or malformed data.
  */
-function searchMetaFromResult(meta: unknown): SearchMeta | undefined {
+export function searchMetaFromResult(meta: unknown): SearchMeta | undefined {
   if (typeof meta !== "object" || meta === null || Array.isArray(meta)) return undefined
   const { sources, truncated } = meta as Record<string, unknown>
-  if (!Array.isArray(sources) || !sources.every(isWebSource)) return undefined
+  if (!Array.isArray(sources) || !sources.every(isMetaSource)) return undefined
   if (typeof truncated !== "boolean") return undefined
   return { sources, truncated }
 }
