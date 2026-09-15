@@ -1,0 +1,19 @@
+# Paper Search plugin. Exports papersearch_* tools backed by native
+# TypeScript source adapters covering the upstream 21-source catalog
+# (arXiv, PubMed, bioRxiv/medRxiv, Google Scholar, IACR, Semantic Scholar,
+# Crossref, OpenAlex, PMC, CORE, Europe PMC, dblp, OpenAIRE, CiteSeerX,
+# DOAJ, BASE, Zenodo, HAL, SSRN, Unpaywall) — no Python, no external
+# process. Downloads land in the OKF sources dir so okf_ingest can
+# compile them in the same session. All fields optional. API keys resolve
+# through the harness credentials seam (credential store, then
+# environment: CORE_API_KEY etc., legacy PAPERSEARCH_* names still
+# honored); only non-secret fields are patched here. Never ship a
+# machine-specific absolute path in this file.
+- insert:
+    - id: papersearch
+      name: dsh-papersearch
+      config:
+        pdfDir: !!js process.env.PAPERSEARCH_PDF_DIR || '${cwd}/OKF/sources/pdfs'
+        unpaywallEmail: !!js process.env.PAPERSEARCH_UNPAYWALL_EMAIL || ''
+        contactEmail: !!js process.env.PAPERSEARCH_CONTACT_EMAIL || ''
+        scholarProxyUrl: !!js process.env.PAPERSEARCH_GOOGLE_SCHOLAR_PROXY_URL || ''
