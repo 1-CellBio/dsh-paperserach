@@ -1,0 +1,203 @@
+import type { Context } from "@deepseek-ai/cordis";
+import type { JobOutcome } from "@deepseek-ai/dsh-jobs";
+import type { ToolRunContext } from "@deepseek-ai/dsh-tools";
+import path from "node:path";
+import "./kinds";
+import { LineLog } from "./log-buffer";
+import { downloadAll, pickDownloadable, searchSources, type DownloadOutcome } from "./registry";
+
+/** Start one papersearch background job through the ctx.jobs seam.
+ * @param ctx - plugin context; must expose the jobs service when background is requested.
+ * @param exec - the tool execution whose agent fences the job.
+ * @param spec - job label plus the work to run with the shared log and its abort signal.
+ * @returns the job handle; log and done serve in-process consumers, the tool result
+ *   carries only the job id. */
+export function startPapersearchJob(
+  ctx: Context,
+  exec: Pick<ToolRunContext, "agent">,
+  spec: {
+    label: string;
+    run: (log: LineLog, signal: AbortSignal) => Promise<string>;
+  },
+): { kind: "background"; jobId: string; log: LineLog; done: Promise<JobOutcome> } {
+  const jobs: Context["jobs"] | undefined = ctx.get("jobs");
+  if (jobs === undefined) {
+    throw new Error("background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs");
+  }
+  // The log is created here (not inside run) so the caller can tap it for
+  // progress reporting before the worker starts appending.
+  const log = new LineLog();
+  let settle: (outcome: JobOutcome) => void = () => {};
+  const done = new Promise<JobOutcome>((resolve) => {
+    settle = resolve;
+  });
+  const id = jobs.start({
+    kind: "papersearch-fetch",
+    label: spec.label,
+    ...(exec.agent ? { owner: exec.agent } : {}),
+    run: () => {
+      const controller = new AbortController();
+      const worker = spec.run(log, controller.signal).then(
+        (detail): JobOutcome => ({ status: "completed", detail }),
+        (error: unknown): JobOutcome => {
+          if (controller.signal.aborted) {
+            return { status: "killed", detail: "aborted" };
+          }
+          const message = error instanceof Error ? error.message : String(error);
+          log.append(`error: ${message}`);
+          return { status: "failed", detail: message };
+        },
+      );
+      worker.then(settle, settle);
+      return {
+        cancel: () => controller.abort(),
+        done: worker,
+        readOutput: () => log.readOutput(),
+      };
+    },
+  });
+  return { kind: "background", jobId: id, log, done };
+}
+
+/** One papersearch_fetch run, validated and resolved by the tools layer. */
+export interface FetchJobArgs {
+  query: string;
+  sources?: string[];
+  maxResults: number;
+  year?: string;
+  /** Papers to download (already capped at MAX_FETCH_COUNT by the tools layer). */
+  count: number;
+  /** Absolute download dir. */
+  dir: string;
+  searchTimeoutMs: number;
+  downloadTimeoutMs: number;
+}
+
+/** The fetch manifest shared by the synchronous tool result and the job detail. */
+export interface FetchJobResult {
+  query: string;
+  sources: string[];
+  totalFound: number;
+  candidates: number;
+  requested: number;
+  results: DownloadOutcome[];
+  dir: string;
+  errors: Record<string, string>;
+}
+
+/** Search + download pipeline behind papersearch_fetch, appending one log line
+ *  per phase and per settled paper into `log`.
+ * @param args - the validated fetch inputs.
+ * @param refreshKeys - re-resolves source credentials inside the run, so a
+ *   background job honors settings/credential-store changes per operation.
+ * @param log - incremental output consumed by job_output.
+ * @param signal - cancellation; aborts in-flight fetches and maps to a killed job.
+ * @returns the manifest the tool result (sync) or the job detail (background) renders. */
+export async function runFetchJob(
+  args: FetchJobArgs,
+  refreshKeys: () => Promise<void>,
+  log: LineLog,
+  signal: AbortSignal,
+): Promise<FetchJobResult> {
+  await refreshKeys();
+  throwIfAborted(signal);
+  const sources = args.sources ? args.sources.join(",") : "all";
+  log.append(`search "${args.query}" sources=${sources} max=${args.maxResults}${args.year ? ` year=${args.year}` : ""}`);
+  const search = await searchSources({
+    query: args.query,
+    sources: args.sources,
+    maxResults: args.maxResults,
+    year: args.year,
+    signal,
+    timeoutMs: args.searchTimeoutMs,
+  });
+  // searchSources folds per-source failures (including aborts) into its errors
+  // map, so this fence is what turns a cancelled search into a killed job.
+  throwIfAborted(signal);
+  const failedSources = Object.entries(search.errors);
+  log.append(
+    `search finished: ${search.total} paper(s) from ${search.sourcesUsed.length} source(s)`
+      + (failedSources.length > 0 ? `, ${failedSources.length} source error(s)` : ""),
+  );
+  for (const [id, message] of failedSources) {
+    log.append(`search error ${id}: ${message}`);
+  }
+  const candidates = pickDownloadable(
+    search.papers.map((paper) => ({
+      paperId: paper.paperId,
+      source: paper.source,
+      title: paper.title,
+      pdfUrl: paper.pdfUrl,
+      doi: paper.doi,
+    })),
+    args.count,
+  );
+  log.append(`download ${candidates.length} paper(s) into ${args.dir}`);
+  const results = await downloadAll(
+    candidates.map((paper) => ({
+      source: paper.source,
+      paperId: paper.paperId,
+      title: paper.title,
+      doi: paper.doi,
+      pdfUrl: paper.pdfUrl,
+    })),
+    {
+      dir: args.dir,
+      signal,
+      timeoutMs: args.downloadTimeoutMs,
+      onOutcome: (outcome) => {
+        const id = `${outcome.source}/${outcome.paperId}`;
+        log.append(
+          outcome.status === "failed"
+            ? `failed ${id}: ${outcome.error ?? "unknown error"}`
+            : `${outcome.status} ${id} -> ${outcome.path ?? ""}`,
+        );
+      },
+    },
+  );
+  const counts = outcomeCounts(results);
+  log.append(`downloaded ${counts.downloaded}, exists ${counts.exists}, failed ${counts.failed}`);
+  return {
+    query: args.query,
+    sources: search.sourcesUsed,
+    totalFound: search.total,
+    candidates: candidates.length,
+    requested: args.count,
+    results,
+    dir: args.dir,
+    errors: search.errors,
+  };
+}
+
+/** One-line completion detail: outcome counts plus the staged file names
+ *  okf_ingest needs (relative names resolve against the download dir).
+ * @param result - the settled fetch manifest.
+ * @returns the job outcome detail string. */
+export function fetchJobDetail(result: FetchJobResult): string {
+  const counts = outcomeCounts(result.results);
+  const staged = result.results
+    .filter((outcome) => outcome.status !== "failed")
+    .flatMap((outcome) => (outcome.path ? [path.basename(outcome.path)] : []));
+  return `downloaded ${counts.downloaded}, exists ${counts.exists}, failed ${counts.failed} — dir ${result.dir}`
+    + (staged.length > 0 ? ` (${staged.join(", ")})` : "");
+}
+
+function outcomeCounts(results: readonly DownloadOutcome[]): { downloaded: number; exists: number; failed: number } {
+  let downloaded = 0;
+  let exists = 0;
+  let failed = 0;
+  for (const outcome of results) {
+    if (outcome.status === "downloaded") downloaded += 1;
+    else if (outcome.status === "exists") exists += 1;
+    else failed += 1;
+  }
+  return { downloaded, exists, failed };
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+  if (signal.aborted) {
+    const error = new Error("aborted");
+    error.name = "AbortError";
+    throw error;
+  }
+}

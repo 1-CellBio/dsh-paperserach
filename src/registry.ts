@@ -372,10 +372,14 @@ export function pickDownloadable<T extends { paperId: string; source: string; pd
   return picked;
 }
 
-/** Bounded-concurrency batch download. Throws AbortError on abort. */
+/** Bounded-concurrency batch download. Throws AbortError on abort.
+ *  onOutcome fires once per settled paper (any status), in completion order. */
 export async function downloadAll(
   tasks: Array<{ source: string; paperId: string; title?: string; doi?: string; pdfUrl?: string }>,
-  options: DownloadOptions & { concurrency?: number },
+  options: DownloadOptions & {
+    concurrency?: number;
+    onOutcome?: (outcome: DownloadOutcome) => void;
+  },
 ): Promise<DownloadOutcome[]> {
   const concurrency = Math.max(1, Math.min(5, options.concurrency ?? 3));
   const results: DownloadOutcome[] = [];
@@ -387,6 +391,7 @@ export async function downloadAll(
       cursor += 1;
       const outcome = await downloadPaper(task.source, task.paperId, options, task);
       results.push(outcome);
+      options.onOutcome?.(outcome);
     }
   };
   await Promise.all(Array.from({ length: Math.min(concurrency, tasks.length) }, () => worker()));
