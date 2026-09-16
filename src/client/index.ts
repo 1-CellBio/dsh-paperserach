@@ -8,7 +8,7 @@ import { PapersearchSettingsController } from "./settings-controller.ts";
 import type { PapersearchSettingsScope } from "./settings-form.ts";
 import { NS, en, zh } from "./locales.ts";
 
-export const inject = ["slots", "locale", "settingsScope", "remote"];
+export const inject = ["slots", "locale", "settingsScope", "remote", "remote.credentials"];
 
 type ClientApplyContext = {
   slots: {

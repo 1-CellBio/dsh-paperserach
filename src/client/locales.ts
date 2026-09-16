@@ -52,7 +52,11 @@ export type PapersearchLocaleKey =
   | "search.doi"
   | "search.failed"
   | "search.stopped"
-  | "search.stoppedDetail";
+  | "search.stoppedDetail"
+  | "search.showMore"
+  | "search.showLess"
+  | "search.copyIngest"
+  | "search.copied";
 
 export const zh: Record<PapersearchLocaleKey, string> = {
   "settings.title": "Paper Search 源密钥",
@@ -107,6 +111,10 @@ export const zh: Record<PapersearchLocaleKey, string> = {
   "search.failed": "检索失败",
   "search.stopped": "检索已中断",
   "search.stoppedDetail": "工具调用被中断，未返回检索结果",
+  "search.showMore": "展开其余 {n} 篇文献 ▾",
+  "search.showLess": "收起 ▴",
+  "search.copyIngest": "+ 入库",
+  "search.copied": "已复制",
 };
 
 export const en: Record<PapersearchLocaleKey, string> = {
@@ -162,4 +170,8 @@ export const en: Record<PapersearchLocaleKey, string> = {
   "search.failed": "Search failed",
   "search.stopped": "Search interrupted",
   "search.stoppedDetail": "The tool call was interrupted before results returned",
+  "search.showMore": "Show {n} more ▾",
+  "search.showLess": "Show less ▴",
+  "search.copyIngest": "+ Ingest",
+  "search.copied": "Copied",
 };
