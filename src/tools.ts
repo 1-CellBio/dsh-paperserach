@@ -2,12 +2,11 @@ import type { Context } from "@deepseek-ai/cordis";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import type { GenericCallView, ToolRunContext } from "@deepseek-ai/dsh-tools";
 import type { JsonValue } from "@deepseek-ai/dsh-util-values";
-import path from "node:path";
 import { papersearchHelp } from "./help";
 import { downloadPaper, fetchPdf, searchSources, SOURCE_IDS, activeSourceIds } from "./registry";
 import { safeFileFragment } from "./sources/adapter";
 import { resolveSciHubPdfUrl, sciHubMirrors } from "./sources/sci_hub";
-import { resolvePdfDir } from "./paths";
+import { confineDirToBase, resolvePdfDir } from "./paths";
 import { refreshSourceKeys } from "./keys";
 import { fetchJobDetail, runFetchJob, startPapersearchJob, type FetchJobArgs } from "./jobs";
 import { LineLog } from "./log-buffer";
@@ -166,7 +165,7 @@ export function registerTools(ctx: Context, getConfig: ConfigSource): void {
     parameters: {
       source: { type: "string", required: true, description: "Source id, e.g. arxiv, biorxiv, semantic, pmc" },
       paperId: { type: "string", required: true, description: "Paper id as returned by papersearch_search (e.g. 2404.18021v2, a DOI, a PMID)" },
-      dir: { type: "string", description: "Optional save dir. Default the OKF sources dir; relative paths resolve against it." },
+      dir: { type: "string", description: "Optional save dir, confined to the OKF sources dir: relative paths resolve against it; absolute paths and .. escapes are rejected (move the root via the pdfDir setting)." },
       doi: { type: "string", description: "Optional DOI for the repository/unpaywall fallback when the source has no native PDF" },
       title: { type: "string", description: "Optional title for the repository fallback and the result manifest" },
     },
@@ -180,9 +179,7 @@ export function registerTools(ctx: Context, getConfig: ConfigSource): void {
 
       const base = pdfDirFor(exec);
       const rawDir = asString(args.dir);
-      const dir = rawDir
-        ? path.isAbsolute(rawDir) ? path.normalize(rawDir) : path.resolve(base, rawDir)
-        : base;
+      const dir = rawDir ? confineDirToBase(base, rawDir) : base;
 
       const outcome = await downloadPaper(source, paperId, {
         dir,
@@ -205,7 +202,7 @@ export function registerTools(ctx: Context, getConfig: ConfigSource): void {
       "Download a paper PDF from Sci-Hub as a LAST-RESORT connector by DOI, title, PMID, or paper URL into the OKF sources dir (OKF/sources/pdfs). Sci-Hub mirrors host paywalled (copyrighted) papers, so only use this when the normal OA fallback chain in papersearch_download fails. Returns the saved path, or an error if the mirror cannot resolve the article (article not found / blocked / CAPTCHA).",
     parameters: {
       identifier: { type: "string", required: true, description: "DOI (preferred), title, PMID, or paper URL to look up on Sci-Hub" },
-      dir: { type: "string", description: "Optional save dir. Default the OKF sources dir; relative paths resolve against it." },
+      dir: { type: "string", description: "Optional save dir, confined to the OKF sources dir: relative paths resolve against it; absolute paths and .. escapes are rejected (move the root via the pdfDir setting)." },
       baseUrl: { type: "string", description: "Optional Sci-Hub mirror base URL (default: built-in mirror list, rotated; or the scihubBaseUrl setting)" },
     },
     output: jsonOutput,
@@ -217,9 +214,7 @@ export function registerTools(ctx: Context, getConfig: ConfigSource): void {
 
       const base = pdfDirFor(exec);
       const rawDir = asString(args.dir);
-      const dir = rawDir
-        ? path.isAbsolute(rawDir) ? path.normalize(rawDir) : path.resolve(base, rawDir)
-        : base;
+      const dir = rawDir ? confineDirToBase(base, rawDir) : base;
       const explicit = asString(args.baseUrl);
       const mirrors = explicit ? [explicit.replace(/\/+$/, "")] : undefined;
       const primary = explicit ?? sciHubMirrors()[0];

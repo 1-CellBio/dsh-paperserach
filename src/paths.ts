@@ -16,3 +16,19 @@ export function resolvePdfDir(raw: string, cwd?: string): string {
   }
   return path.resolve(expanded);
 }
+
+/** Resolve a user-supplied dir argument against the download base and confine
+ *  it there: anything that resolves outside the base (absolute paths, `..`
+ *  escapes — path.resolve normalizes them away) is rejected. The base is the
+ *  pdfDir setting / OKF sources dir; moving it is a settings change, not a
+ *  tool argument. */
+export function confineDirToBase(base: string, raw: string): string {
+  const resolved = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(base, raw);
+  const prefix = base.endsWith(path.sep) ? base : base + path.sep;
+  if (resolved !== base && !resolved.startsWith(prefix)) {
+    throw new Error(
+      `dsh-papersearch: dir '${raw}' resolves outside the download root ${base}; use a relative subdir, or move the root via the pdfDir setting`,
+    );
+  }
+  return resolved;
+}

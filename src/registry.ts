@@ -1,4 +1,5 @@
-import { mkdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { HttpError, USER_AGENT } from "./http";
 import { currentSourceKeys, sciHubEnabled } from "./keys";
@@ -213,8 +214,11 @@ function repositoryAdapters(): SourceAdapter[] {
     .filter((source): source is SourceAdapter => Boolean(source));
 }
 
-/** Stream a PDF from `url` into `dir/<baseName>.pdf`. Validates the payload
- * actually looks like a PDF (content-type or %PDF- magic). */
+/** Stream a PDF from `url` into `dir/<baseName>.pdf`. The %PDF- magic is
+ * mandatory (content-type is a diagnostic signal only, never a pass); the
+ * write is atomic — payload lands in a unique `<name>.pdf.<pid>-<uuid>.part`
+ * first, then renames, so concurrent downloads of the same paper (a background
+ * fetch job racing a foreground download) never share an inode. */
 export async function fetchPdf(
   url: string,
   dir: string,
@@ -237,13 +241,21 @@ export async function fetchPdf(
     if (buffer.byteLength < 1024) {
       throw new Error(`not a PDF (${buffer.byteLength} bytes, content-type ${contentType || "unknown"})`);
     }
-    const looksPdf = contentType.includes("pdf") || buffer.subarray(0, 5).toString("ascii") === "%PDF-";
-    if (!looksPdf) {
-      throw new Error(`not a PDF (content-type ${contentType || "unknown"})`);
+    if (buffer.subarray(0, 5).toString("ascii") !== "%PDF-") {
+      throw new Error(`not a PDF (content-type ${contentType || "unknown"}, missing %PDF- magic)`);
     }
     await mkdir(dir, { recursive: true });
     const file = path.join(dir, `${safeFileFragment(baseName)}.pdf`);
-    await writeFile(file, buffer);
+    // Unique tmp name: same dir keeps the rename on one filesystem (atomic),
+    // pid+uuid keeps concurrent writers off each other's inode.
+    const part = `${file}.${process.pid}-${randomUUID()}.part`;
+    try {
+      await writeFile(part, buffer);
+      await rename(part, file);
+    } catch (error) {
+      await rm(part, { force: true }).catch(() => {});
+      throw error;
+    }
     return { path: file, bytes: buffer.byteLength };
   } finally {
     clearTimeout(timer);

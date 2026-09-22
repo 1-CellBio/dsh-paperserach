@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -79,6 +79,35 @@ describe("fetchPdf", () => {
   it("rejects payloads that are not PDFs (magic check)", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => fakePdfResponse(Buffer.from("<html>not a pdf</html>"), "text/html")));
     await expect(fetchPdf("https://x/1", dir, "bad", {})).rejects.toThrow(/not a PDF/);
+  });
+
+  it("rejects an HTML error page served with a pdf content-type (magic is mandatory)", async () => {
+    const html = Buffer.concat([Buffer.from("<html>error page</html>\n"), Buffer.from("x".repeat(2048))]);
+    vi.stubGlobal("fetch", vi.fn(async () => fakePdfResponse(html, "application/pdf")));
+    await expect(fetchPdf("https://x/1", dir, "fakepdf", {})).rejects.toThrow(/missing %PDF- magic/);
+  });
+
+  it("saves a payload with %PDF- magic regardless of the content-type", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => fakePdfResponse(pdfMagic, "application/octet-stream")));
+    const saved = await fetchPdf("https://x/1", dir, "oddbin", {});
+    expect(saved.path).toBe(path.join(dir, "oddbin.pdf"));
+  });
+
+  it("leaves no .part file behind after a successful save", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => fakePdfResponse()));
+    await fetchPdf("https://x/1", dir, "clean", {});
+    await expect(stat(path.join(dir, "clean.pdf"))).resolves.toHaveProperty("size", pdfMagic.byteLength);
+    const entries = await readdir(dir);
+    expect(entries.filter((name) => name.endsWith(".part"))).toEqual([]);
+  });
+
+  it("cleans up the .part file when the final rename fails", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => fakePdfResponse()));
+    // A directory parked on the target name makes the file→target rename fail.
+    await mkdir(path.join(dir, "blocked.pdf"));
+    await expect(fetchPdf("https://x/1", dir, "blocked", {})).rejects.toThrow();
+    const entries = await readdir(dir);
+    expect(entries.filter((name) => name.endsWith(".part"))).toEqual([]);
   });
 
   it("rejects tiny payloads", async () => {
