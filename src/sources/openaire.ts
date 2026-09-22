@@ -1,5 +1,5 @@
 import { getJson, qs } from "../http";
-import { extractDoi, type Paper } from "../paper";
+import { bareDoi, extractDoi, type Paper } from "../paper";
 import type { SearchArgs, SourceAdapter } from "./adapter";
 
 /** OpenAIRE research graph — EU project outputs aggregated from repositories.
@@ -53,17 +53,26 @@ function fileUrls(record: OpenAireResultRecord): string[] {
   return urls;
 }
 
-function toPaper(record: OpenAireResultRecord, index: number): Paper {
+function toPaper(record: OpenAireResultRecord): Paper {
   const result = record.metadata?.["oaf:entity"]?.["oaf:result"] ?? {};
   const files = fileUrls(record);
   const title = contentOf(result.title?.[0]);
   const landing = files.find((file) => !file.endsWith(".pdf")) ?? files[0] ?? "";
+  const doi = extractDoi(landing);
+  // Stable id: the result-array index must never leak into it — re-running
+  // the same search with reordered results keeps a paper's id (and therefore
+  // its download file name and exists short-circuit) unchanged. Preferred
+  // key is the normalized DOI, then the landing URL, then the normalized
+  // title (bounded so pathological titles cannot overflow file-name limits).
+  const paperId = doi
+    ? bareDoi(doi).toLowerCase()
+    : landing || title.replace(/\s+/g, " ").trim().toLowerCase().slice(0, 96);
   return {
-    paperId: `openaire-${index}-${title.slice(0, 40)}`,
+    paperId,
     title,
     authors: (result.creator ?? []).map((creator) => creator.content ?? "").filter(Boolean),
     abstract: contentOf(result.description?.[0]).replace(/\s+/g, " ").trim(),
-    doi: extractDoi(landing),
+    doi,
     publishedDate: (contentOf(result.dateofacceptance?.[0]) ?? "").slice(0, 10),
     pdfUrl: files.find((file) => file.endsWith(".pdf")) ?? "",
     url: landing,
@@ -83,7 +92,7 @@ export const openaireSource: SourceAdapter = {
       timeoutMs: args.timeoutMs,
     });
     return (payload.response?.result ?? [])
-      .map((record, index) => toPaper(record, index))
+      .map((record) => toPaper(record))
       .filter((paper) => paper.title);
   },
 };

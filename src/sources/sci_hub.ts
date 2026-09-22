@@ -1,4 +1,5 @@
 import { currentSourceKeys } from "../keys";
+import { fetchWithRetry } from "../http";
 import { absoluteUrl, attrValue, decodeHtmlEntities, stripTags } from "../html";
 
 /** Sci-Hub is the LAST resort of the download fallback chain: it serves
@@ -200,12 +201,12 @@ export async function resolveSciHubPdfUrl(
     if (options.signal?.aborted) return undefined;
     const startedAt = Date.now();
     try {
-      const response = await fetch(`${mirror}/${id}`, {
+      // Shared retry/cooldown layer: a transient 429/503 retries this mirror
+      // instead of demoting it (and letting a weaker fallback win the slot).
+      const response = await fetchWithRetry(`${mirror}/${id}`, {
         headers: { "User-Agent": UA, Accept: "text/html,*/*" },
-        redirect: "follow",
-        signal: options.signal
-          ? AbortSignal.any([options.signal, AbortSignal.timeout(options.timeoutMs ?? 20_000)])
-          : AbortSignal.timeout(options.timeoutMs ?? 20_000),
+        signal: options.signal,
+        timeoutMs: options.timeoutMs ?? 20_000,
       });
       if (!response.ok) {
         noteFailure(mirror);

@@ -1,4 +1,5 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -12,6 +13,23 @@ const pdfMagic = Buffer.concat([
   Buffer.from("%PDF-1.7 fake content for tests\n"),
   Buffer.from("x".repeat(2048)),
 ]);
+
+/** Pre-stage a file exactly the way a completed download leaves it: the PDF
+ * plus a matching .meta.json sidecar, so the exists short-circuit verifies
+ * it instead of re-downloading over it. */
+async function preExisting(pdfPath: string): Promise<void> {
+  await writeFile(pdfPath, pdfMagic);
+  await writeFile(`${pdfPath}.meta.json`, JSON.stringify({
+    sha256: createHash("sha256").update(pdfMagic).digest("hex"),
+    bytes: pdfMagic.byteLength,
+    doi: "",
+    title: "",
+    source: "arxiv",
+    sourceUrl: `https://arxiv.org/pdf/${path.basename(pdfPath)}`,
+    retrievedAt: new Date().toISOString(),
+    identity: "repository-unverified",
+  }));
+}
 
 /** fetch response fake good enough for getText (text) and fetchPdf (arrayBuffer). */
 function fakeResponse(body: string | Buffer, contentType: string) {
@@ -125,7 +143,7 @@ describe("papersearch_fetch background job seam", () => {
   });
 
   it("defaults to a background job with owner fencing, per-paper log lines, and staged paths in the detail", async () => {
-    await writeFile(path.join(dir, "arxiv-2401.00002.pdf"), pdfMagic);
+    await preExisting(path.join(dir, "arxiv-2401.00002.pdf"));
     stubNetwork();
     const jobs = fakeJobs();
     const getConfig: ConfigSource = () => ({ pdfDir: dir, useScihub: false });
@@ -148,7 +166,7 @@ describe("papersearch_fetch background job seam", () => {
 
     const outcome = await jobs.started[0]!.hooks.done;
     expect(outcome.status).toBe("completed");
-    expect(outcome.detail).toContain("downloaded 1, exists 1, failed 1");
+    expect(outcome.detail).toContain("downloaded 1, replaced 0, exists 1, failed 1");
     expect(outcome.detail).toContain("arxiv-2401.00001.pdf");
     expect(outcome.detail).toContain("arxiv-2401.00002.pdf");
     // Credentials refresh inside the job body, so the job honors store changes per operation.
@@ -161,7 +179,7 @@ describe("papersearch_fetch background job seam", () => {
     expect(output).toContain(`downloaded arxiv/2401.00001 -> ${path.join(dir, "arxiv-2401.00001.pdf")}`);
     expect(output).toContain(`exists arxiv/2401.00002 -> ${path.join(dir, "arxiv-2401.00002.pdf")}`);
     expect(output).toContain("failed arxiv/2401.00003: ");
-    expect(output.trimEnd().endsWith("downloaded 1, exists 1, failed 1")).toBe(true);
+    expect(output.trimEnd().endsWith("downloaded 1, replaced 0, exists 1, failed 1")).toBe(true);
     // One consuming cursor: a second read returns nothing new.
     expect(jobs.started[0]!.hooks.readOutput()).toBe("");
   });
@@ -196,7 +214,7 @@ describe("papersearch_fetch background job seam", () => {
   });
 
   it("background=false keeps the synchronous manifest path without starting a job", async () => {
-    await writeFile(path.join(dir, "arxiv-2401.00002.pdf"), pdfMagic);
+    await preExisting(path.join(dir, "arxiv-2401.00002.pdf"));
     stubNetwork();
     const jobs = fakeJobs();
     const fetch = fetchTool(jobs.registry, () => ({ pdfDir: dir, useScihub: false }));

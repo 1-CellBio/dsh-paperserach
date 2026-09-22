@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SOURCES, SOURCE_IDS } from "../registry";
 import { refreshSourceKeys } from "../keys";
+import type { Paper } from "../paper";
 import type { SearchArgs, SourceAdapter } from "../sources/adapter";
 
 /** Contract tests over the whole adapter roster: capabilities declared in
@@ -131,6 +132,41 @@ describe("request shaping", () => {
       title: "Atom entry",
       pdfUrl: "https://arxiv.org/pdf/2404.18021v2",
       source: "arxiv",
+    });
+  });
+
+  it("openaire paperIds are stable across result reorderings (doi > landing url > title)", async () => {
+    const record = (urls: string[], title: string) => ({
+      metadata: {
+        "oaf:entity": {
+          "oaf:result": {
+            title: [{ content: title }],
+            children: [{ instance: [{ webresource: urls.map((url) => ({ url })) }] }],
+          },
+        },
+      },
+    });
+    const withDoi = record(["https://doi.org/10.1109/test.2020", "https://repo.example/a.pdf"], "Paper A");
+    const byLanding = record(["https://repo.example/b.pdf"], "Paper B");
+    const byTitle = { metadata: { "oaf:entity": { "oaf:result": { title: [{ content: "Paper C" }] } } } };
+
+    const run = async (result: unknown[]): Promise<Paper[]> => {
+      vi.stubGlobal("fetch", vi.fn(async () =>
+        new Response(JSON.stringify({ response: { results: result.length, result } }), { status: 200 }),
+      ));
+      return byId("openaire").search(args());
+    };
+    const forward = await run([withDoi, byLanding, byTitle]);
+    const reversed = await run([byTitle, byLanding, withDoi]);
+
+    const idsByTitle = (papers: Paper[]): Record<string, string> =>
+      Object.fromEntries(papers.map((paper) => [paper.title, paper.paperId]));
+    // The result-array order must not leak into any id.
+    expect(idsByTitle(reversed)).toEqual(idsByTitle(forward));
+    expect(idsByTitle(forward)).toEqual({
+      "Paper A": "10.1109/test.2020",
+      "Paper B": "https://repo.example/b.pdf",
+      "Paper C": "paper c",
     });
   });
 });

@@ -31,9 +31,12 @@ function fakePdfResponse() {
 }
 
 /** .part tmp paths observed through the writeFile spy, e.g. for assertions on
- *  the `<final>.<pid>-<uuid>.part` shape and per-call uniqueness. */
+ *  the `<final>.<pid>-<uuid>.part` shape and per-call uniqueness. Sidecar
+ *  writes go through the same spy, so filter down to staging paths. */
 function observedPartPaths(): string[] {
-  return writeFileMock.mock.calls.map((call: unknown[]) => String(call[0]));
+  return writeFileMock.mock.calls
+    .map((call: unknown[]) => String(call[0]))
+    .filter((file: string) => file.endsWith(".part"));
 }
 
 describe("fetchPdf .part handling", () => {

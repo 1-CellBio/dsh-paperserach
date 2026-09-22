@@ -18,12 +18,12 @@ function stubAdapter(id: string, behavior: {
   };
 }
 
-const withPdf = (url: string): Paper => ({
+const withPdf = (url: string, doi = ""): Paper => ({
   paperId: "x",
   title: "t",
   authors: [],
   abstract: "",
-  doi: "",
+  doi,
   publishedDate: "",
   pdfUrl: url,
   url: url,
@@ -33,12 +33,13 @@ const withPdf = (url: string): Paper => ({
 });
 
 describe("collectRepositoryCandidates", () => {
-  it("queries doi first then title, in repository order", async () => {
+  it("keeps DOI-equal hits and never runs the title query once one lands", async () => {
     const seen: Array<{ id: string; query: string }> = [];
     const sources = REPOSITORY_FALLBACK_IDS.map((id) => stubAdapter(id, {
       papers: (query) => {
         seen.push({ id, query });
-        return [withPdf(`https://${id}.example/${query.includes("/") ? "doi" : "title"}.pdf`)];
+        if (id === "openaire" && query === "10.1/x") return [withPdf("https://openaire.example/doi.pdf", "10.1/x")];
+        return [];
       },
     }));
 
@@ -47,15 +48,71 @@ describe("collectRepositoryCandidates", () => {
       title: "A Paper",
     });
 
-    // per-source doi→title order (upstream `for repo: for query:` shape);
-    // the candidate cap stops collection after openaire/core
+    // The verified hit is the only candidate; the DOI queries of the other
+    // repositories may run for backup links, but the title query never does.
+    expect(urls).toEqual([{ url: "https://openaire.example/doi.pdf", identity: "doi-url" }]);
+    expect(seen.some((entry) => entry.query === "A Paper")).toBe(false);
+  });
+
+  it("drops DOI-phase hits whose DOI does not match the request", async () => {
+    const sources = [stubAdapter("openaire", {
+      papers: () => [withPdf("https://openaire.example/wrong.pdf", "10.9/other")],
+    })];
+    const urls = await collectRepositoryCandidates(sources, { doi: "10.1/x" });
+    expect(urls).toEqual([]);
+  });
+
+  it("fills from the title query only when the DOI phase found nothing", async () => {
+    const seen: string[] = [];
+    const sources = REPOSITORY_FALLBACK_IDS.map((id) => stubAdapter(id, {
+      papers: (query) => {
+        seen.push(`${id}:${query}`);
+        return query === "A Paper" ? [withPdf(`https://${id}.example/title.pdf`)] : [];
+      },
+    }));
+
+    const urls = await collectRepositoryCandidates(sources, {
+      doi: "10.1/x",
+      title: "A Paper",
+    });
+
     expect(urls).toEqual([
-      "https://openaire.example/doi.pdf",
-      "https://openaire.example/title.pdf",
-      "https://core.example/doi.pdf",
+      { url: "https://openaire.example/title.pdf", identity: "title-fallback" },
+      { url: "https://core.example/title.pdf", identity: "title-fallback" },
+      { url: "https://europepmc.example/title.pdf", identity: "title-fallback" },
     ]);
-    expect(seen.map((entry) => entry.id)).toEqual(["openaire", "openaire", "core"]);
-    expect(seen.map((entry) => entry.query)).toEqual(["10.1/x", "A Paper", "10.1/x"]);
+    // Every repository got the DOI query; the title query ran until the
+    // global cap (3) stopped it inside europepmc.
+    expect(seen).toEqual([
+      "openaire:10.1/x",
+      "core:10.1/x",
+      "europepmc:10.1/x",
+      "pmc:10.1/x",
+      "openaire:A Paper",
+      "core:A Paper",
+      "europepmc:A Paper",
+    ]);
+  });
+
+  it("marks a title-phase hit carrying the requested DOI as doi-url (normalized, case-insensitive)", async () => {
+    const sources = [stubAdapter("openaire", {
+      papers: (query) => (query === "A Paper" ? [withPdf("https://openaire.example/x.pdf", "https://doi.org/10.1/X")] : []),
+    })];
+    const urls = await collectRepositoryCandidates(sources, { doi: "10.1/x", title: "A Paper" });
+    expect(urls).toEqual([{ url: "https://openaire.example/x.pdf", identity: "doi-url" }]);
+  });
+
+  it("runs only the title phase when no DOI is given", async () => {
+    const seen: string[] = [];
+    const sources = [stubAdapter("openaire", {
+      papers: (query) => {
+        seen.push(query);
+        return [withPdf("https://openaire.example/t.pdf")];
+      },
+    })];
+    const urls = await collectRepositoryCandidates(sources, { title: "t" });
+    expect(urls).toEqual([{ url: "https://openaire.example/t.pdf", identity: "title-fallback" }]);
+    expect(seen).toEqual(["t"]);
   });
 
   it("survives repository failures and still collects later hits", async () => {
@@ -64,7 +121,7 @@ describe("collectRepositoryCandidates", () => {
       stubAdapter("ok", { papers: () => [withPdf("https://ok.example/a.pdf")] }),
     ];
     const urls = await collectRepositoryCandidates(sources, { title: "t" });
-    expect(urls).toEqual(["https://ok.example/a.pdf"]);
+    expect(urls).toEqual([{ url: "https://ok.example/a.pdf", identity: "title-fallback" }]);
   });
 
   it("returns nothing without doi or title", async () => {

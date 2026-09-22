@@ -80,7 +80,12 @@ function retryDelayMs(attempt: number, retryAfter: string | null, isRateLimit: b
   return Math.min(15_000, (attempt + 1) * 1_500);
 }
 
-async function fetchWithRetry(
+/** Shared request primitive: native fetch plus the retry ladder, host 429
+ * cooldown, timeout and abort merge. Callers that need raw Response bodies
+ * (PDF streams, HTML pages) ride the same transient-failure policy as the
+ * JSON endpoints — a momentary 429/503 retries THIS url instead of letting
+ * the caller silently fall through to a lower-quality fallback. */
+export async function fetchWithRetry(
   url: string,
   init: RequestInit & { timeoutMs?: number; signal?: AbortSignal },
 ): Promise<Response> {

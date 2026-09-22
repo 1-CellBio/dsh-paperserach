@@ -37,7 +37,11 @@ function parseRow(block: string): ScholarRow | undefined {
   const dash = text.indexOf(" - ") >= 0 ? text.indexOf(" - ") : text.indexOf(" – ");
   const head = dash >= 0 ? text.slice(0, dash) : text;
   const tail = dash >= 0 ? text.slice(dash + 3) : "";
-  const year = /(?:19|20)\d{2}/.exec(text)?.[0] ?? "";
+  // The year comes from the author segment only (after the title link,
+  // before the first " - "). A four-digit year anywhere else — the snippet,
+  // "cited by 2019" counts — must never masquerade as the publication year;
+  // a segment without one leaves publishedDate empty.
+  const year = dash >= 0 ? (/(?:19|20)\d{2}/.exec(head)?.[0] ?? "") : "";
   const authors = head.replace(/,?\s*(?:19|20)\d{2}$/, "").trim();
   const citations = Number(/cited by (\d+)/i.exec(tail)?.[1] ?? 0) || 0;
   return { title, url, authors, year, citations, snippet: tail.slice(0, 300) };

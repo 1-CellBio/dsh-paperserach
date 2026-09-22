@@ -15,7 +15,7 @@ describe("google_scholar parser", () => {
   it("extracts title link, authors, year and cited-by from a result block", () => {
     const html = `<div class="gs_r gs_or gs_scl"><div class="gs_ri">
       <h3 class="gs_rt"><a id="link1" href="https://example.org/paper">Deep learning for cells</a></h3>
-      <div class="gs_a">R Chen, J Doe - Journal of Cells, 2021 - publisher.example</div>
+      <div class="gs_a">R Chen, J Doe, 2021 - Journal of Cells - publisher.example</div>
       <div class="gs_rs">A survey of methods. cited by 123 Flaky text follows.</div>
     </div></div>`;
     const [paper] = parseScholarHtml(html);
@@ -27,6 +27,26 @@ describe("google_scholar parser", () => {
       citations: 123,
     });
     expect(paper!.authors).toEqual(["R Chen", "J Doe"]);
+  });
+
+  it("never takes the year from snippet text (cited by 2019)", () => {
+    const html = `<div class="gs_r gs_or gs_scl"><div class="gs_ri">
+      <h3 class="gs_rt"><a href="https://example.org/p2">Another paper</a></h3>
+      <div class="gs_a">R Chen - Journal of Cells - publisher.example</div>
+      <div class="gs_rs">Methods from 2019 were limited. cited by 2019 readers agreed.</div>
+    </div></div>`;
+    // The author segment carries no four-digit year → publishedDate is empty,
+    // even though the snippet mentions 2019 twice.
+    expect(parseScholarHtml(html)[0]!.publishedDate).toBe("");
+  });
+
+  it("prefers the author-segment year over snippet years", () => {
+    const html = `<div class="gs_r gs_or gs_scl"><div class="gs_ri">
+      <h3 class="gs_rt"><a href="https://example.org/p3">Third paper</a></h3>
+      <div class="gs_a">R Chen, 2020 - publisher.example</div>
+      <div class="gs_rs">Builds on 2019 work and cites 2018 results.</div>
+    </div></div>`;
+    expect(parseScholarHtml(html)[0]!.publishedDate).toBe("2020");
   });
 
   it("keeps a [PDF] side link as the direct pdf url", () => {

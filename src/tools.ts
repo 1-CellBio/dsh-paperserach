@@ -7,6 +7,7 @@ import { downloadPaper, fetchPdf, searchSources, SOURCE_IDS, activeSourceIds } f
 import { safeFileFragment } from "./sources/adapter";
 import { resolveSciHubPdfUrl, sciHubMirrors } from "./sources/sci_hub";
 import { confineDirToBase, resolvePdfDir } from "./paths";
+import { extractDoi } from "./paper";
 import { refreshSourceKeys } from "./keys";
 import { fetchJobDetail, runFetchJob, startPapersearchJob, type FetchJobArgs } from "./jobs";
 import { LineLog } from "./log-buffer";
@@ -161,7 +162,7 @@ export function registerTools(ctx: Context, getConfig: ConfigSource): void {
   ctx.tools.register(defineTool({
     name: "papersearch_download",
     description:
-      "Download one paper PDF by source + paper_id into the OKF sources dir (OKF/sources/pdfs). After it returns, call okf_ingest with the path to compile the paper into the library. Idempotent: an existing file is reported as status 'exists' and not re-downloaded. When the source has no native PDF, the fallback chain tries open repositories (openaire/core/europepmc/pmc) by DOI/title and then the unpaywall OA resolver.",
+      "Download one paper PDF by source + paper_id into the OKF sources dir (OKF/sources/pdfs). After it returns, call okf_ingest with the path to compile the paper into the library. Idempotent: an existing file whose sha256 matches its .meta.json sidecar is reported as status 'exists' and not re-downloaded; changed bytes are overwritten and reported 'replaced' (every save writes a provenance sidecar: sha256, doi, sourceUrl, retrievedAt, identity). When the source has no native PDF, the fallback chain tries open repositories (openaire/core/europepmc/pmc) by DOI first — a DOI-verified hit stops the chain — then by title, then the unpaywall OA resolver.",
     parameters: {
       source: { type: "string", required: true, description: "Source id, e.g. arxiv, biorxiv, semantic, pmc" },
       paperId: { type: "string", required: true, description: "Paper id as returned by papersearch_search (e.g. 2404.18021v2, a DOI, a PMID)" },
@@ -236,6 +237,12 @@ export function registerTools(ctx: Context, getConfig: ConfigSource): void {
       const saved = await fetchPdf(resolved.url, dir, safeFileFragment(`scihub-${identifier}`), {
         signal: exec.signal,
         timeoutMs: downloadTimeout(),
+        meta: {
+          doi: extractDoi(identifier),
+          source: "scihub",
+          sourceUrl: resolved.url,
+          identity: "scihub",
+        },
       });
       return asJson({
         identifier,
@@ -255,7 +262,7 @@ export function registerTools(ctx: Context, getConfig: ConfigSource): void {
   ctx.tools.register(defineTool({
     name: "papersearch_fetch",
     description:
-      "One-call discovery → download loop: run a multi-source search, then download the top N papers that have a working PDF source into the OKF sources dir (OKF/sources/pdfs). Long-running: defaults to a background job that returns a job id, with per-paper progress (downloaded/exists/failed + path) in the job output and the staged file names in the completion detail. You are notified in-session when it finishes — do NOT poll in a loop; when genuinely blocked, call job_output once with wait=true and timeout_ms=600000 (the maximum) instead of many short waits. background=false runs synchronously and returns the per-paper manifest (downloaded / exists / failed). Follow with okf_ingest on the downloaded paths to complete the OKF closed loop.",
+      "One-call discovery → download loop: run a multi-source search, then download the top N papers that have a working PDF source into the OKF sources dir (OKF/sources/pdfs). Long-running: defaults to a background job that returns a job id, with per-paper progress (downloaded/replaced/exists/failed + path) in the job output and the staged file names in the completion detail. You are notified in-session when it finishes — do NOT poll in a loop; when genuinely blocked, call job_output once with wait=true and timeout_ms=600000 (the maximum) instead of many short waits. background=false runs synchronously and returns the per-paper manifest (downloaded / replaced / exists / failed). Follow with okf_ingest on the downloaded paths to complete the OKF closed loop.",
     parameters: {
       query: { type: "string", required: true, description: "Search query — be specific" },
       sources: { type: "string", description: `Comma-separated source ids or omit for all (${SOURCE_IDS.join(", ")})` },

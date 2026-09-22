@@ -156,7 +156,7 @@ export async function runFetchJob(
     },
   );
   const counts = outcomeCounts(results);
-  log.append(`downloaded ${counts.downloaded}, exists ${counts.exists}, failed ${counts.failed}`);
+  log.append(`downloaded ${counts.downloaded}, replaced ${counts.replaced}, exists ${counts.exists}, failed ${counts.failed}`);
   return {
     query: args.query,
     sources: search.sourcesUsed,
@@ -178,20 +178,22 @@ export function fetchJobDetail(result: FetchJobResult): string {
   const staged = result.results
     .filter((outcome) => outcome.status !== "failed")
     .flatMap((outcome) => (outcome.path ? [path.basename(outcome.path)] : []));
-  return `downloaded ${counts.downloaded}, exists ${counts.exists}, failed ${counts.failed} — dir ${result.dir}`
+  return `downloaded ${counts.downloaded}, replaced ${counts.replaced}, exists ${counts.exists}, failed ${counts.failed} — dir ${result.dir}`
     + (staged.length > 0 ? ` (${staged.join(", ")})` : "");
 }
 
-function outcomeCounts(results: readonly DownloadOutcome[]): { downloaded: number; exists: number; failed: number } {
+function outcomeCounts(results: readonly DownloadOutcome[]): { downloaded: number; replaced: number; exists: number; failed: number } {
   let downloaded = 0;
+  let replaced = 0;
   let exists = 0;
   let failed = 0;
   for (const outcome of results) {
     if (outcome.status === "downloaded") downloaded += 1;
+    else if (outcome.status === "replaced") replaced += 1;
     else if (outcome.status === "exists") exists += 1;
     else failed += 1;
   }
-  return { downloaded, exists, failed };
+  return { downloaded, replaced, exists, failed };
 }
 
 function throwIfAborted(signal: AbortSignal): void {
