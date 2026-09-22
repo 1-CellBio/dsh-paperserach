@@ -15,6 +15,10 @@ const registered = [];
 let promptText = "";
 const disposers = [];
 const ctx = {
+  // credentials/jobs services absent（与 settings 同契约）：cordis 的
+  // Context.get 返回 undefined → 凭据 seam 落 env 兜底。stub 缺 get 会让
+  // papersearch_help.execute（→refreshKeys→resolver）炸 TypeError。
+  get: () => undefined,
   tools: {
     register(tool) {
       registered.push(tool);
@@ -61,7 +65,10 @@ assert.ok(JSON.stringify(helpJson).includes("papersearch_fetch"));
 // client bundle: the ModuleLoader banner + settings-card slot registration
 const clientPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../lib/client.js");
 const client = readFileSync(clientPath, "utf8");
-assert.ok(client.includes('window.__ModuleLoader__.load({ id: "dsh-papersearch"'), "client banner missing");
+// 横幅形态随 tsdown 输出格式（美化多行/压缩单行）变化——断言拆两段：
+// load 协议包裹 + 正确的 loader id，不钉死换行位置。
+assert.ok(client.includes("window.__ModuleLoader__.load("), "client banner missing");
+assert.ok(client.includes('id: "dsh-papersearch"'), "client loader id missing");
 assert.ok(client.includes("settings.plugin.item"), "settings card slot missing");
 assert.ok(!client.includes("sources/sci_hub"), "client bundle must not ship node-side adapters");
 

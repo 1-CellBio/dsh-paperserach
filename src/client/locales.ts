@@ -4,6 +4,13 @@ export type PapersearchLocaleKey =
   | "settings.title"
   | "settings.description"
   | "settings.unsaved"
+  | "settings.sectionCredentials"
+  | "settings.sectionGeneral"
+  | "settings.overridden"
+  | "settings.reset"
+  | "settings.save"
+  | "settings.discard"
+  | "settings.keyUndo"
   | "settings.readOnly"
   | "settings.saveFailed"
   | "settings.coreApiKeyEnv"
@@ -45,6 +52,8 @@ export type PapersearchLocaleKey =
   | "settings.keyWriteHint"
   | "settings.keyClear"
   | "settings.keyClearStaged"
+  | "settings.advancedEnvTitle"
+  | "settings.advancedEnvHint"
   | "search.title"
   | "search.searching"
   | "search.truncated"
@@ -62,6 +71,13 @@ export const zh: Record<PapersearchLocaleKey, string> = {
   "settings.title": "Paper Search 源密钥",
   "settings.description": "学术源凭据引用与下载目录（全部可选，留空走免费档）",
   "settings.unsaved": "未保存",
+  "settings.sectionCredentials": "数据源密钥",
+  "settings.sectionGeneral": "常规设置",
+  "settings.overridden": "已覆盖",
+  "settings.reset": "重置",
+  "settings.save": "保存",
+  "settings.discard": "放弃更改",
+  "settings.keyUndo": "撤销暂存",
   "settings.readOnly": "当前设置只读",
   "settings.saveFailed": "保存失败，请重试",
   "settings.coreApiKeyEnv": "CORE API Key 引用名（可选）",
@@ -85,7 +101,7 @@ export const zh: Record<PapersearchLocaleKey, string> = {
   "settings.scihubBaseUrl": "Sci-Hub 镜像地址（可选）",
   "settings.scihubBaseUrlHint": "逗号分隔多个镜像并自动轮换；留空用内置列表（sci-hub.vg/al/mk…）",
   "settings.pdfDir": "PDF 下载目录",
-  "settings.pdfDirHint": "默认 ${cwd}/OKF/sources/pdfs（对齐 dsh-okf）",
+  "settings.pdfDirHint": "默认 ${cwd}/OKF/sources/pdfs（自动对齐 OKF 知识库来源目录）",
   "settings.coreApiKey": "CORE API Key",
   "settings.coreApiKeyHint": "免费申请：core.ac.uk/services/api，提升限额",
   "settings.doajApiKey": "DOAJ API Key",
@@ -93,7 +109,7 @@ export const zh: Record<PapersearchLocaleKey, string> = {
   "settings.zenodoAccessToken": "Zenodo Access Token",
   "settings.zenodoAccessTokenHint": "zenodo.org 账户设置创建，解锁受限记录",
   "settings.semanticScholarApiKey": "Semantic Scholar API Key",
-  "settings.semanticScholarApiKeyHint": "免费申请：semanticscholar.org/product/api，提升限额",
+  "settings.semanticScholarApiKeyHint": "免费申请：semanticscholar.org/product/api，提升限额（与科研写作 CSW 共享凭据）",
   "settings.ieeeApiKey": "IEEE Xplore API Key",
   "settings.ieeeApiKeyHint": "developer.ieee.org 申请；启用 ieee 源（仅元数据）",
   "settings.acmApiKey": "ACM API Key",
@@ -103,6 +119,8 @@ export const zh: Record<PapersearchLocaleKey, string> = {
   "settings.keyWriteHint": "值不回显：留空保持不变，输入并保存即写入主机凭据存储",
   "settings.keyClear": "清除",
   "settings.keyClearStaged": "将清除",
+  "settings.advancedEnvTitle": "高级：自定义环境变量名映射（可选）",
+  "settings.advancedEnvHint": "通常无需修改；留空或使用默认值即可自动读取标准环境变量",
   "search.title": "文献检索",
   "search.searching": "正在检索文献…",
   "search.truncated": "命中结果超过上限，列表已截断",
@@ -121,6 +139,13 @@ export const en: Record<PapersearchLocaleKey, string> = {
   "settings.title": "Paper Search source keys",
   "settings.description": "Academic source credential references and download dir (all optional; empty = free tier)",
   "settings.unsaved": "unsaved",
+  "settings.sectionCredentials": "Source keys",
+  "settings.sectionGeneral": "General",
+  "settings.overridden": "Overridden",
+  "settings.reset": "Reset",
+  "settings.save": "Save",
+  "settings.discard": "Discard",
+  "settings.keyUndo": "Undo staged",
   "settings.readOnly": "Settings are read-only here",
   "settings.saveFailed": "Save failed, please retry",
   "settings.coreApiKeyEnv": "CORE API key reference (optional)",
@@ -144,7 +169,7 @@ export const en: Record<PapersearchLocaleKey, string> = {
   "settings.scihubBaseUrl": "Sci-Hub mirror base URL (optional)",
   "settings.scihubBaseUrlHint": "Comma-separated mirrors, auto-rotated; empty = built-in list (sci-hub.vg/al/mk...)",
   "settings.pdfDir": "PDF download dir",
-  "settings.pdfDirHint": "Default ${cwd}/OKF/sources/pdfs (dsh-okf layout)",
+  "settings.pdfDirHint": "Default ${cwd}/OKF/sources/pdfs (aligned with OKF sources layout)",
   "settings.coreApiKey": "CORE API key",
   "settings.coreApiKeyHint": "Free at core.ac.uk/services/api — raises rate limits",
   "settings.doajApiKey": "DOAJ API key",
@@ -152,7 +177,7 @@ export const en: Record<PapersearchLocaleKey, string> = {
   "settings.zenodoAccessToken": "Zenodo access token",
   "settings.zenodoAccessTokenHint": "Create in zenodo.org account settings; unlocks restricted records",
   "settings.semanticScholarApiKey": "Semantic Scholar API key",
-  "settings.semanticScholarApiKeyHint": "Free at semanticscholar.org/product/api — improves rate limits",
+  "settings.semanticScholarApiKeyHint": "Free at semanticscholar.org/product/api (shared with CSW)",
   "settings.ieeeApiKey": "IEEE Xplore API key",
   "settings.ieeeApiKeyHint": "Free tier at developer.ieee.org; enables the ieee source (metadata only)",
   "settings.acmApiKey": "ACM API key",
@@ -162,6 +187,8 @@ export const en: Record<PapersearchLocaleKey, string> = {
   "settings.keyWriteHint": "Write-only: leave blank to keep; saving a value writes it to the Host credential store",
   "settings.keyClear": "Clear",
   "settings.keyClearStaged": "will be cleared",
+  "settings.advancedEnvTitle": "Advanced: Environment variable references (optional)",
+  "settings.advancedEnvHint": "Usually not needed; defaults read standard environment variables",
   "search.title": "Paper search",
   "search.searching": "Searching papers…",
   "search.truncated": "Results exceeded the cap; the list was truncated",
