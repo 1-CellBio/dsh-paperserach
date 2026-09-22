@@ -66,7 +66,7 @@ function toPaper(record: OpenAireResultRecord): Paper {
   // title (bounded so pathological titles cannot overflow file-name limits).
   const paperId = doi
     ? bareDoi(doi).toLowerCase()
-    : landing || title.replace(/\s+/g, " ").trim().toLowerCase().slice(0, 96);
+    : landing || title.replace(/\s+/g, " ").trim().toLowerCase(); // [终审修复] 全长归一标题——96 字符截断让长标题系列文碰撞同 paperId，exists 短路拿到错文 PDF
   return {
     paperId,
     title,

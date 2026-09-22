@@ -457,7 +457,9 @@ export async function downloadPaper(
     if (doi) {
       try {
         const fallback = await resolveOaPdfUrl(doi, { signal: options.signal, timeoutMs: options.timeoutMs });
-        if (fallback) candidates.push({ url: fallback, identity: "repository-unverified" });
+        // [终审修复] Unpaywall 按 DOI 精确解析（绑定强度与仓库 DOI 相等命中等价）
+      // ——与 collectRepositoryCandidates 的 doi-url 档一致，不再低标。
+      if (fallback) candidates.push({ url: fallback, identity: "doi-url" });
       } catch {
         // unpaywall unavailable — skip silently
       }

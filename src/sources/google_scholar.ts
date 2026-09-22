@@ -32,16 +32,20 @@ function parseRow(block: string): ScholarRow | undefined {
   const url = absoluteUrl(decodeHtmlEntities(heading[1]!), "https://scholar.google.com");
   const title = stripTags(heading[2]!);
   if (!url || !title) return undefined;
-  // Remaining text: "R Chen, J Doe - journal, 2020 - publisher — cited by 123 — snippet…"
+  // [终审修复，2026-09-22] 年份取自 gs_a 元数据行本身（标题链接后的
+  // <div class="gs_a">authors - venue, YEAR - host</div>）——主流格式的年份
+  // 在第二段（D2 初版只看第一段，把绝大多数行的年份丢掉）；snippet
+  // （gs_rs）与 cited-by 计数绝不参与。gs_a 行整体取第一处四位数：venue
+  // 段的年份总在 host 段/host 无年份形态之前；作者名含四位数的形态极罕
+  // 见且旧实现同样无法区分。
+  const metaMatch = /<div class="gs_a">([\s\S]*?)<\/div>/i.exec(block);
+  const metaLine = metaMatch ? stripTags(metaMatch[1]!) : "";
+  const year = /(?:19|20)\d{2}/.exec(metaLine)?.[0] ?? "";
+  // Remaining text (authors/cited-by/snippet) for the other fields.
   const text = stripTags(block.replace(heading[0]!, " "));
   const dash = text.indexOf(" - ") >= 0 ? text.indexOf(" - ") : text.indexOf(" – ");
   const head = dash >= 0 ? text.slice(0, dash) : text;
   const tail = dash >= 0 ? text.slice(dash + 3) : "";
-  // The year comes from the author segment only (after the title link,
-  // before the first " - "). A four-digit year anywhere else — the snippet,
-  // "cited by 2019" counts — must never masquerade as the publication year;
-  // a segment without one leaves publishedDate empty.
-  const year = dash >= 0 ? (/(?:19|20)\d{2}/.exec(head)?.[0] ?? "") : "";
   const authors = head.replace(/,?\s*(?:19|20)\d{2}$/, "").trim();
   const citations = Number(/cited by (\d+)/i.exec(tail)?.[1] ?? 0) || 0;
   return { title, url, authors, year, citations, snippet: tail.slice(0, 300) };

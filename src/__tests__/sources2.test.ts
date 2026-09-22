@@ -29,6 +29,15 @@ describe("google_scholar parser", () => {
     expect(paper!.authors).toEqual(["R Chen", "J Doe"]);
   });
 
+  it("[终审修复] 主流 gs_a 格式（authors - venue, YEAR - host）的年份在第二段也取到", () => {
+    const html = `<div class="gs_r gs_or gs_scl"><div class="gs_ri">
+      <h3 class="gs_rt"><a href="https://example.org/p4">Mainstream row</a></h3>
+      <div class="gs_a">F Zhang, H Li - Nature communications, 2020 - nature.com</div>
+      <div class="gs_rs">Snippet without any year mention.</div>
+    </div></div>`;
+    expect(parseScholarHtml(html)[0]!.publishedDate).toBe("2020");
+  });
+
   it("never takes the year from snippet text (cited by 2019)", () => {
     const html = `<div class="gs_r gs_or gs_scl"><div class="gs_ri">
       <h3 class="gs_rt"><a href="https://example.org/p2">Another paper</a></h3>
