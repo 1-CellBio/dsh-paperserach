@@ -124,3 +124,17 @@ describe("compactSearchResult", () => {
     expect(result.truncated).toBe(true);
   });
 });
+
+// [F3，2026-09-22 可追溯性批] 截断标记：半段摘要不得看起来像全文。
+describe("compactPaper abstractTruncated（F3）", () => {
+  it("超 600 字符 → 截断 + abstractTruncated:true；未超 → 无该字段", () => {
+    const long = compactPaper({
+      ...base,
+      abstract: "x".repeat(601),
+    });
+    expect(long.abstract.endsWith("…")).toBe(true);
+    expect(long.abstractTruncated).toBe(true);
+    const short = compactPaper({ ...base, abstract: "short abstract" });
+    expect(short.abstractTruncated).toBeUndefined();
+  });
+});

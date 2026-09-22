@@ -28,6 +28,10 @@ export interface CompactPaper {
   source: string;
   citations: number;
   abstract: string;
+  /** [F3，2026-09-22 可追溯性批] true = 摘要被截到 600 字符——检索卡片
+   *  的 abstract 不是全文也不是可 snap 的原文，消费方（模型/UI）不得把
+   *  半段摘要当全文对待。 */
+  abstractTruncated?: true;
 }
 
 const ABSTRACT_CAP = 600;
@@ -42,6 +46,7 @@ export function yearOf(paper: Pick<Paper, "publishedDate">): string {
 export function compactPaper(paper: Paper): CompactPaper {
   const abstract = (paper.abstract ?? "").replace(/\s+/g, " ").trim();
   const authors = (paper.authors ?? []).join("; ");
+  const truncated = abstract.length > ABSTRACT_CAP;
   return {
     paperId: paper.paperId.trim(),
     title: paper.title.trim(),
@@ -52,7 +57,8 @@ export function compactPaper(paper: Paper): CompactPaper {
     url: paper.url.trim(),
     source: paper.source,
     citations: typeof paper.citations === "number" ? paper.citations : 0,
-    abstract: abstract.length > ABSTRACT_CAP ? `${abstract.slice(0, ABSTRACT_CAP)}…` : abstract,
+    abstract: truncated ? `${abstract.slice(0, ABSTRACT_CAP)}…` : abstract,
+    ...(truncated ? { abstractTruncated: true as const } : {}),
   };
 }
 
