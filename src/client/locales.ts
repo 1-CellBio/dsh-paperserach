@@ -54,6 +54,16 @@ export type PapersearchLocaleKey =
   | "settings.keyClearStaged"
   | "settings.advancedEnvTitle"
   | "settings.advancedEnvHint"
+  | "settings.unavailable"
+  | "settings.saving"
+  | "settings.invalidNumber"
+  | "settings.invalidBoolean"
+  | "settings.searchTimeoutMs"
+  | "settings.searchTimeoutMsHint"
+  | "settings.downloadTimeoutMs"
+  | "settings.downloadTimeoutMsHint"
+  | "settings.useScihub"
+  | "settings.useScihubHint"
   | "search.title"
   | "search.searching"
   | "search.truncated"
@@ -121,6 +131,16 @@ export const zh: Record<PapersearchLocaleKey, string> = {
   "settings.keyClearStaged": "将清除",
   "settings.advancedEnvTitle": "高级：自定义环境变量名映射（可选）",
   "settings.advancedEnvHint": "通常无需修改；留空或使用默认值即可自动读取标准环境变量",
+  "settings.unavailable": "当前环境不提供此插件的设置",
+  "settings.saving": "保存中…",
+  "settings.invalidNumber": "需为数字",
+  "settings.invalidBoolean": "需为 true 或 false",
+  "settings.searchTimeoutMs": "检索超时 (ms)",
+  "settings.searchTimeoutMsHint": "多源检索单次请求上限，默认 120000",
+  "settings.downloadTimeoutMs": "下载超时 (ms)",
+  "settings.downloadTimeoutMsHint": "单篇 PDF 下载上限，默认 300000",
+  "settings.useScihub": "启用 Sci-Hub 回退",
+  "settings.useScihubHint": "true = 最后的 PDF 回退走 Sci-Hub 镜像（默认 true）",
   "search.title": "文献检索",
   "search.searching": "正在检索文献…",
   "search.truncated": "命中结果超过上限，列表已截断",
@@ -189,6 +209,16 @@ export const en: Record<PapersearchLocaleKey, string> = {
   "settings.keyClearStaged": "will be cleared",
   "settings.advancedEnvTitle": "Advanced: Environment variable references (optional)",
   "settings.advancedEnvHint": "Usually not needed; defaults read standard environment variables",
+  "settings.unavailable": "Settings for this plugin are not served here",
+  "settings.saving": "Saving…",
+  "settings.invalidNumber": "Must be a number",
+  "settings.invalidBoolean": "Must be true or false",
+  "settings.searchTimeoutMs": "Search timeout (ms)",
+  "settings.searchTimeoutMsHint": "Per-request cap for multi-source search; default 120000",
+  "settings.downloadTimeoutMs": "Download timeout (ms)",
+  "settings.downloadTimeoutMsHint": "Per-paper PDF download cap; default 300000",
+  "settings.useScihub": "Enable Sci-Hub fallback",
+  "settings.useScihubHint": "true = last PDF fallback via Sci-Hub mirrors (default true)",
   "search.title": "Paper search",
   "search.searching": "Searching papers…",
   "search.truncated": "Results exceeded the cap; the list was truncated",

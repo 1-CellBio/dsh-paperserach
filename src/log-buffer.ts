@@ -1,34 +1,21 @@
-/** Incremental UTF-8 log for `job_output` (one consuming cursor). */
+/** Incremental UTF-8 log for the jobs output ring (0.1.7: registry-owned). */
 
 export class LineLog {
   private readonly lines: string[] = [];
-  private cursor = 0;
-  private onAppend?: (line: string) => void;
+  private ringSink: ((chunk: string) => void) | undefined;
 
-  constructor(onAppend?: (line: string) => void) {
-    this.onAppend = onAppend;
-  }
-
-  /** Attach (or replace) the live tap; sees each line as it is appended. */
-  tap(listener: (line: string) => void): void {
-    this.onAppend = listener;
+  /** 接线注册表输出环（run(job) 内调用一次；此后每行追加即进环）。 */
+  ring(sink: (chunk: string) => void): void {
+    this.ringSink = sink;
   }
 
   append(line: string): void {
     const cleaned = line.replace(/\s+$/u, "");
     this.lines.push(cleaned);
-    this.onAppend?.(cleaned);
+    this.ringSink?.(`${cleaned}\n`);
   }
 
-  readOutput(): string {
-    if (this.cursor >= this.lines.length) {
-      return "";
-    }
-    const chunk = this.lines.slice(this.cursor).join("\n");
-    this.cursor = this.lines.length;
-    return `${chunk}\n`;
-  }
-
+  /** 进程内全量快照（调试/测试用；注册表侧另有 job_output 游标读）。 */
   snapshot(): string {
     return this.lines.join("\n");
   }

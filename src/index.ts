@@ -4,57 +4,37 @@ import { credentialRef } from "@deepseek-ai/dsh-credentials";
 import { DEFAULT_PDF_DIR } from "./paths";
 import { setCredentialResolver } from "./keys";
 import { installPapersearchSettings } from "./settings";
+import type { PapersearchConfigEntry } from "./types";
 import { registerTools } from "./tools";
 
 export const name = "dsh-papersearch";
 export const inject = ["tools", "systemPrompt"];
 
-export interface Config {
-  /** Download dir for PDFs. Default ${cwd}/OKF/sources/pdfs (dsh-okf layout). */
-  pdfDir?: string;
-  /** Multi-source search timeout in ms. */
-  searchTimeoutMs?: number;
-  /** Per-paper download timeout in ms. */
-  downloadTimeoutMs?: number;
-  /** Credential reference (env-var name) for the CORE API key; default CORE_API_KEY. */
-  coreApiKeyEnv?: string;
-  /** Credential reference for the DOAJ API key; default DOAJ_API_KEY. */
-  doajApiKeyEnv?: string;
-  /** Credential reference for the Zenodo access token; default ZENODO_ACCESS_TOKEN. */
-  zenodoAccessTokenEnv?: string;
-  /** Credential reference for the Semantic Scholar API key; default SEMANTIC_SCHOLAR_API_KEY. */
-  semanticScholarApiKeyEnv?: string;
-  /** Unpaywall contact email (enables the OA download fallback). */
-  unpaywallEmail?: string;
-  /** Contact email for polite API pools (crossref/openalex). Optional. */
-  contactEmail?: string;
-  /** Credential reference for the IEEE Xplore API key; default IEEE_API_KEY. */
-  ieeeApiKeyEnv?: string;
-  /** Credential reference for the ACM key; default ACM_API_KEY. */
-  acmApiKeyEnv?: string;
-  /** Forward proxy (http:// or socks5://) for Google Scholar requests. */
-  scholarProxyUrl?: string;
-  /** Enable the Sci-Hub mirror as the last PDF fallback (default true). */
-  useScihub?: boolean;
-  /** Sci-Hub mirror base URL(s), comma-separated; empty = built-in list (rotated). */
-  scihubBaseUrl?: string;
-}
+/**
+ * 0.1.7：Config 是 Loader entry 视图（volatile 字段为 Volatile 实例，
+ * settings.ts 组装 PapersearchConfig 快照供下游）；快照类型见 types.ts。
+ */
+export type Config = PapersearchConfigEntry;
 
-export const Config: z<Config> = z.object({
-  pdfDir: z.string().default(DEFAULT_PDF_DIR),
-  searchTimeoutMs: z.number().default(120_000),
-  downloadTimeoutMs: z.number().default(300_000),
+// 0.1.7：volatile schema 裸声明（schemastery 的 volatile 输出类型与 z<T>
+// 标注位不兼容，宿主 bash-local/ui-theme 同款），键位一致性靠
+// PapersearchConfigEntry 与此字面量的同构评审维持。可编辑字段 volatile
+// 化（settings 页自动表单直编）；credential-ref 字段保持静态。
+export const Config = z.object({
+  pdfDir: z.string().default(DEFAULT_PDF_DIR).volatile(),
+  searchTimeoutMs: z.number().default(120_000).volatile(),
+  downloadTimeoutMs: z.number().default(300_000).volatile(),
   coreApiKeyEnv: z.string().role("credential-ref").default("CORE_API_KEY"),
   doajApiKeyEnv: z.string().role("credential-ref").default("DOAJ_API_KEY"),
   zenodoAccessTokenEnv: z.string().role("credential-ref").default("ZENODO_ACCESS_TOKEN"),
   semanticScholarApiKeyEnv: z.string().role("credential-ref").default("SEMANTIC_SCHOLAR_API_KEY"),
-  unpaywallEmail: z.string().default(""),
-  contactEmail: z.string().default(""),
+  unpaywallEmail: z.string().default("").volatile(),
+  contactEmail: z.string().default("").volatile(),
   ieeeApiKeyEnv: z.string().role("credential-ref").default("IEEE_API_KEY"),
   acmApiKeyEnv: z.string().role("credential-ref").default("ACM_API_KEY"),
-  scholarProxyUrl: z.string().default(""),
-  useScihub: z.boolean().default(true),
-  scihubBaseUrl: z.string().default(""),
+  scholarProxyUrl: z.string().default("").volatile(),
+  useScihub: z.boolean().default(true).volatile(),
+  scihubBaseUrl: z.string().default("").volatile(),
 });
 
 export function apply(ctx: Context, config: Config): void {
@@ -68,6 +48,6 @@ export function apply(ctx: Context, config: Config): void {
     const credentials: Context["credentials"] | undefined = ctx.get("credentials");
     return (await credentials?.resolve(credentialRef(ref)))?.value;
   });
-  const getConfig = installPapersearchSettings(ctx, Config, config);
+  const getConfig = installPapersearchSettings(ctx, config);
   registerTools(ctx, getConfig);
 }

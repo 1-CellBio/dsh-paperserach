@@ -59,27 +59,33 @@ function atomFeed(ids: string[]): string {
 interface JobHooksLike {
   cancel: () => void;
   done: Promise<{ status: string; detail?: string }>;
-  readOutput: () => string;
 }
 
 interface StartedJob {
   kind: string;
   label: string;
   owner?: unknown;
+  /** 注册表输出环的追加序（0.1.7：job.append 的 chunk 依序落此）。 */
+  ring: string[];
   hooks: JobHooksLike;
 }
 
-/** Records jobs.start specs; run() is invoked synchronously like the real registry. */
+/** Records jobs.start specs; run(job) is invoked synchronously like the real
+ *  registry, with a handle whose appends land in the recorded ring. */
 function fakeJobs() {
   const started: StartedJob[] = [];
   let seq = 0;
   return {
     started,
     registry: {
-      start(spec: { kind: string; label: string; owner?: unknown; run: () => JobHooksLike }): string {
+      start(spec: { kind: string; label: string; owner?: unknown; run: (job: { append(chunk: string): void; updateProgress(line: string): void }) => JobHooksLike }): string {
         seq += 1;
-        const hooks = spec.run();
-        started.push({ kind: spec.kind, label: spec.label, owner: spec.owner, hooks });
+        const ring: string[] = [];
+        const hooks = spec.run({
+          append: (chunk: string) => ring.push(chunk),
+          updateProgress: () => {},
+        });
+        started.push({ kind: spec.kind, label: spec.label, owner: spec.owner, ring, hooks });
         return `${spec.kind}-${seq}`;
       },
     },
@@ -149,7 +155,8 @@ describe("papersearch_fetch background job seam", () => {
     const getConfig: ConfigSource = () => ({ pdfDir: dir, useScihub: false });
     const fetch = fetchTool(jobs.registry, getConfig);
     const refreshSpy = vi.spyOn(keys, "refreshSourceKeys");
-    const agent = { session: { header: {} } };
+    // 0.1.7：job owner 是 SessionId（agent.id），不再是 Agent 引用本体。
+    const agent = { id: "papersearch-fetch-session", session: { header: {} } };
 
     const result = await fetch.execute({ query: "crispr", sources: "arxiv", count: 3 }, execWith(agent));
 
@@ -162,7 +169,7 @@ describe("papersearch_fetch background job seam", () => {
     expect(jobs.started).toHaveLength(1);
     expect(jobs.started[0]!.kind).toBe("papersearch-fetch");
     expect(jobs.started[0]!.label).toBe("papersearch_fetch crispr");
-    expect(jobs.started[0]!.owner).toBe(agent);
+    expect(jobs.started[0]!.owner).toBe("papersearch-fetch-session");
 
     const outcome = await jobs.started[0]!.hooks.done;
     expect(outcome.status).toBe("completed");
@@ -172,7 +179,7 @@ describe("papersearch_fetch background job seam", () => {
     // Credentials refresh inside the job body, so the job honors store changes per operation.
     expect(refreshSpy).toHaveBeenCalledTimes(1);
 
-    const output = jobs.started[0]!.hooks.readOutput();
+    const output = jobs.started[0]!.ring.join("");
     expect(output).toContain('search "crispr" sources=arxiv max=5');
     expect(output).toContain("search finished: 3 paper(s) from 1 source(s)");
     expect(output).toContain(`download 3 paper(s) into ${dir}`);
@@ -180,8 +187,6 @@ describe("papersearch_fetch background job seam", () => {
     expect(output).toContain(`exists arxiv/2401.00002 -> ${path.join(dir, "arxiv-2401.00002.pdf")}`);
     expect(output).toContain("failed arxiv/2401.00003: ");
     expect(output.trimEnd().endsWith("downloaded 1, replaced 0, exists 1, failed 1")).toBe(true);
-    // One consuming cursor: a second read returns nothing new.
-    expect(jobs.started[0]!.hooks.readOutput()).toBe("");
   });
 
   it("maps job kill to a killed outcome and aborts the in-flight search", async () => {

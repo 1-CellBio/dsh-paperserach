@@ -4,11 +4,12 @@ import type { ToolRunContext } from "@deepseek-ai/dsh-tools";
 import path from "node:path";
 import "./kinds";
 import { LineLog } from "./log-buffer";
-import { downloadAll, pickDownloadable, searchSources, type DownloadOutcome } from "./registry";
+import { acquireByDoi, downloadAll, pickDownloadable, searchSources, type DownloadOutcome } from "./registry";
 
 /** Start one papersearch background job through the ctx.jobs seam.
  * @param ctx - plugin context; must expose the jobs service when background is requested.
- * @param exec - the tool execution whose agent fences the job.
+ * @param exec - the tool execution whose agent fences the job (owner = agent.id,
+ *   the SessionId the 0.1.7 registry isolates reads/kills/waits by).
  * @param spec - job label plus the work to run with the shared log and its abort signal.
  * @returns the job handle; log and done serve in-process consumers, the tool result
  *   carries only the job id. */
@@ -24,8 +25,6 @@ export function startPapersearchJob(
   if (jobs === undefined) {
     throw new Error("background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs");
   }
-  // The log is created here (not inside run) so the caller can tap it for
-  // progress reporting before the worker starts appending.
   const log = new LineLog();
   let settle: (outcome: JobOutcome) => void = () => {};
   const done = new Promise<JobOutcome>((resolve) => {
@@ -34,8 +33,11 @@ export function startPapersearchJob(
   const id = jobs.start({
     kind: "papersearch-fetch",
     label: spec.label,
-    ...(exec.agent ? { owner: exec.agent } : {}),
-    run: () => {
+    ...(exec.agent ? { owner: exec.agent.id } : {}),
+    run: (job) => {
+      // 0.1.7：注册表自营输出环——producer 的每行日志经 job.append 进环，
+      // job_output 的增量读取、截断与 spill 全由注册表负责。
+      log.ring((chunk) => job.append(chunk));
       const controller = new AbortController();
       const worker = spec.run(log, controller.signal).then(
         (detail): JobOutcome => ({ status: "completed", detail }),
@@ -52,7 +54,6 @@ export function startPapersearchJob(
       return {
         cancel: () => controller.abort(),
         done: worker,
-        readOutput: () => log.readOutput(),
       };
     },
   });
@@ -194,6 +195,65 @@ function outcomeCounts(results: readonly DownloadOutcome[]): { downloaded: numbe
     else failed += 1;
   }
   return { downloaded, replaced, exists, failed };
+}
+
+/** One papersearch_acquire run, validated and resolved by the tools layer. */
+export interface AcquireJobArgs {
+  /** Bare DOIs, deduplicated (already capped at MAX_ACQUIRE_COUNT). */
+  dois: string[];
+  /** Absolute download dir. */
+  dir: string;
+  downloadTimeoutMs: number;
+}
+
+/** The acquire manifest shared by the synchronous tool result and the job detail. */
+export interface AcquireJobResult {
+  requested: number;
+  results: DownloadOutcome[];
+  dir: string;
+}
+
+/** DOI acquisition pipeline behind papersearch_acquire: S2 openAccessPdf →
+ *  OA repositories + unpaywall → Sci-Hub, one log line per settled DOI. */
+export async function runAcquireJob(
+  args: AcquireJobArgs,
+  refreshKeys: () => Promise<void>,
+  log: LineLog,
+  signal: AbortSignal,
+): Promise<AcquireJobResult> {
+  await refreshKeys();
+  throwIfAborted(signal);
+  log.append(`acquire ${args.dois.length} DOI(s) into ${args.dir} (chain: semantic-scholar → oa-repositories/unpaywall → sci-hub)`);
+  const results = await acquireByDoi(args.dois, {
+    dir: args.dir,
+    signal,
+    timeoutMs: args.downloadTimeoutMs,
+    onOutcome: (outcome) => {
+      log.append(
+        outcome.status === "failed"
+          ? `failed ${outcome.paperId}: ${outcome.error ?? "unknown error"}`
+          : `${outcome.status} ${outcome.paperId} -> ${outcome.path ?? ""}`,
+      );
+    },
+  });
+  const counts = outcomeCounts(results);
+  log.append(`downloaded ${counts.downloaded}, replaced ${counts.replaced}, exists ${counts.exists}, failed ${counts.failed}`);
+  return { requested: args.dois.length, results, dir: args.dir };
+}
+
+/** One-line completion detail: outcome counts plus the staged file names
+ *  okf_ingest needs (relative names resolve against the download dir). */
+export function acquireJobDetail(result: AcquireJobResult): string {
+  const counts = outcomeCounts(result.results);
+  const staged = result.results
+    .filter((outcome) => outcome.status !== "failed")
+    .flatMap((outcome) => (outcome.path ? [path.basename(outcome.path)] : []));
+  const missed = result.results
+    .filter((outcome) => outcome.status === "failed")
+    .map((outcome) => outcome.doi ?? outcome.paperId);
+  return `downloaded ${counts.downloaded}, replaced ${counts.replaced}, exists ${counts.exists}, failed ${counts.failed} — dir ${result.dir}`
+    + (staged.length > 0 ? ` (${staged.join(", ")})` : "")
+    + (missed.length > 0 ? ` — no full text for: ${missed.join(", ")}` : "");
 }
 
 function throwIfAborted(signal: AbortSignal): void {

@@ -7,9 +7,9 @@ import { downloadPaper, fetchPdf, searchSources, SOURCE_IDS, activeSourceIds } f
 import { safeFileFragment } from "./sources/adapter";
 import { resolveSciHubPdfUrl, sciHubMirrors } from "./sources/sci_hub";
 import { confineDirToBase, resolvePdfDir } from "./paths";
-import { extractDoi } from "./paper";
+import { bareDoi, extractDoi } from "./paper";
 import { refreshSourceKeys } from "./keys";
-import { fetchJobDetail, runFetchJob, startPapersearchJob, type FetchJobArgs } from "./jobs";
+import { acquireJobDetail, fetchJobDetail, runAcquireJob, runFetchJob, startPapersearchJob, type AcquireJobArgs, type FetchJobArgs } from "./jobs";
 import { LineLog } from "./log-buffer";
 import { presentSearchResult, searchMetaFromValue } from "./presentation";
 import type { ConfigSource } from "./settings";
@@ -39,7 +39,8 @@ function asString(value: unknown): string | undefined {
 
 const DEFAULT_SEARCH_TIMEOUT_MS = 120_000;
 const DEFAULT_DOWNLOAD_TIMEOUT_MS = 300_000;
-const MAX_FETCH_COUNT = 10;
+const MAX_FETCH_COUNT = 50;
+const MAX_ACQUIRE_COUNT = 50;
 
 function parseSources(raw: string | undefined): string[] | undefined {
   const value = asString(raw);
@@ -129,7 +130,7 @@ export function registerTools(ctx: Context, getConfig: ConfigSource): void {
     parameters: {
       query: { type: "string", required: true, description: "Search query — be specific; include key terms, not full sentences. For biorxiv/medrxiv use a category name like 'cell biology'." },
       sources: { type: "string", description: `Comma-separated source ids or omit for all (${SOURCE_IDS.join(", ")})` },
-      maxResults: { type: "number", description: "Max results per source (default 5)" },
+      maxResults: { type: "number", description: "Max results per source (default 5, max 50)" },
       year: { type: "string", description: "Year filter for Semantic Scholar, e.g. '2023' or '2020-2024'" },
     },
     output: {
@@ -142,7 +143,7 @@ export function registerTools(ctx: Context, getConfig: ConfigSource): void {
       const query = asString(args.query);
       if (!query) throw new Error("papersearch_search: query is required");
       const maxResults = typeof args.maxResults === "number" && args.maxResults > 0
-        ? Math.min(20, Math.floor(args.maxResults))
+        ? Math.min(50, Math.floor(args.maxResults))
         : 5;
       const result = await searchSources({
         query,
@@ -266,9 +267,9 @@ export function registerTools(ctx: Context, getConfig: ConfigSource): void {
     parameters: {
       query: { type: "string", required: true, description: "Search query — be specific" },
       sources: { type: "string", description: `Comma-separated source ids or omit for all (${SOURCE_IDS.join(", ")})` },
-      maxResults: { type: "number", description: "Max search results per source (default 5)" },
+      maxResults: { type: "number", description: "Max search results per source (default 5, max 50)" },
       year: { type: "string", description: "Year filter for Semantic Scholar, e.g. '2023' or '2020-2024'" },
-      count: { type: "number", description: "Papers to download (default 3, max 10)" },
+      count: { type: "number", description: "Papers to download (default 3, max 50)" },
       background: {
         type: "boolean",
         description:
@@ -281,7 +282,7 @@ export function registerTools(ctx: Context, getConfig: ConfigSource): void {
       const query = asString(args.query);
       if (!query) throw new Error("papersearch_fetch: query is required");
       const maxResults = typeof args.maxResults === "number" && args.maxResults > 0
-        ? Math.min(20, Math.floor(args.maxResults))
+        ? Math.min(50, Math.floor(args.maxResults))
         : 5;
       const count = typeof args.count === "number" && args.count > 0
         ? Math.min(MAX_FETCH_COUNT, Math.floor(args.count))
@@ -312,5 +313,64 @@ export function registerTools(ctx: Context, getConfig: ConfigSource): void {
       ));
     },
     presentCall: (args) => present("Papersearch fetch", "execute", args.query),
+  }));
+
+  // ── papersearch_acquire ──────────────────────────────────────────
+  ctx.tools.register(defineTool({
+    name: "papersearch_acquire",
+    description:
+      "Batch-acquire full-text PDFs by DOI into the OKF sources dir (OKF/sources/pdfs). Each DOI is resolved through a DOI-anchored chain: Semantic Scholar's openAccessPdf first, then open repositories (openaire/core/europepmc/pmc) + the unpaywall OA resolver, then Sci-Hub as the last resort. THE full-text acquisition step after csw_research / csw_deep_research / papersearch_search hands you DOIs — acquiring full text BEFORE writing is what lets okf_ingest extract citable claims (abstract-only records starve the evidence gates). Long-running: defaults to a background job that returns a job id, with per-DOI progress in the job output and the staged file names + unresolvable DOIs in the completion detail. You are notified in-session when it finishes — do NOT poll in a loop; when genuinely blocked, call job_output once with wait=true and timeout_ms=600000 (the maximum). background=false runs synchronously and returns the per-DOI manifest. Follow with okf_ingest on the downloaded paths, then okf_search / csw writing.",
+    parameters: {
+      dois: { type: "array", items: { type: "string" }, required: true, description: `DOIs to acquire (bare or https://doi.org/… form; deduplicated, max ${MAX_ACQUIRE_COUNT} per call)` },
+      dir: { type: "string", description: "Optional save dir, confined to the OKF sources dir: relative paths resolve against it; absolute paths and .. escapes are rejected (move the root via the pdfDir setting)." },
+      background: {
+        type: "boolean",
+        description:
+          "Default true. Returns a job id immediately. You are notified in-session on completion — end the turn or do other work; when blocked, job_output with wait=true and timeout_ms=600000. job_kill cancels. false runs the whole batch synchronously in this call.",
+      },
+    },
+    output: jsonOutput,
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const raw = Array.isArray(args.dois) ? args.dois : [];
+      const seen = new Set<string>();
+      const dois: string[] = [];
+      for (const item of raw) {
+        const doi = typeof item === "string" ? bareDoi(item).toLowerCase() : "";
+        if (!doi || seen.has(doi)) continue;
+        seen.add(doi);
+        dois.push(doi);
+        if (dois.length >= MAX_ACQUIRE_COUNT) break;
+      }
+      if (dois.length === 0) throw new Error("papersearch_acquire: dois must contain at least one valid DOI");
+
+      const base = pdfDirFor(exec);
+      const rawDir = asString(args.dir);
+      const dir = rawDir ? confineDirToBase(base, rawDir) : base;
+
+      const jobArgs: AcquireJobArgs = {
+        dois,
+        dir,
+        downloadTimeoutMs: downloadTimeout(),
+      };
+      return asJson(await maybeBackground(
+        ctx,
+        exec,
+        args.background,
+        {
+          label: `papersearch_acquire ${dois.length} DOI(s)`,
+          run: async (log, signal) => acquireJobDetail(await runAcquireJob(jobArgs, refreshKeys, log, signal)),
+        },
+        async (signal) => {
+          const log = new LineLog();
+          const result = await runAcquireJob(jobArgs, refreshKeys, log, signal);
+          return {
+            ...result,
+            nextStep: "Call okf_ingest with the downloaded paths (relative names resolve against the download dir) to compile them into the OKF library, then continue csw writing with okf_search / okf_get evidence.",
+          };
+        },
+      ));
+    },
+    presentCall: (args) => present("Papersearch acquire", "execute", `${Array.isArray(args.dois) ? args.dois.length : 0} DOI(s)`),
   }));
 }

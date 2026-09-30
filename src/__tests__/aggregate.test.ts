@@ -76,13 +76,13 @@ describe("searchSources", () => {
     expect(Object.keys(result.errors)).toHaveLength(result.sourcesUsed.length);
   });
 
-  it("clamps maxResults into the 1..20 window", async () => {
+  it("clamps maxResults into the 1..50 window", async () => {
     const calls: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => {
       calls.push(String(url));
       return new Response(ATOM, { status: 200 });
     }));
     await searchSources({ query: "q", sources: ["arxiv"], maxResults: 99 });
-    expect(calls[0]).toContain("max_results=20");
+    expect(calls[0]).toContain("max_results=50");
   });
 });

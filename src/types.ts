@@ -1,3 +1,5 @@
+import type { Volatile } from "@deepseek-ai/cordis";
+
 export interface PapersearchConfig {
   /** Download dir for PDFs. Default ${cwd}/OKF/sources/pdfs (dsh-okf layout). */
   pdfDir?: string;
@@ -27,4 +29,26 @@ export interface PapersearchConfig {
   useScihub?: boolean;
   /** Sci-Hub mirror base URL(s), comma-separated; empty = built-in list (rotated). */
   scihubBaseUrl?: string;
+}
+
+/**
+ * 0.1.7 Loader entry 视图：可编辑字段是 Volatile 实例（settings 页自动表单
+ * 直编，插件实例不重载），credential-ref 字段保持静态（部署期引用名，经
+ * profile patch 修改后随重载生效）。快照类型见 PapersearchConfig。
+ */
+export interface PapersearchConfigEntry {
+  pdfDir?: Volatile<string>;
+  searchTimeoutMs?: Volatile<number>;
+  downloadTimeoutMs?: Volatile<number>;
+  coreApiKeyEnv?: string;
+  doajApiKeyEnv?: string;
+  zenodoAccessTokenEnv?: string;
+  semanticScholarApiKeyEnv?: string;
+  unpaywallEmail?: Volatile<string>;
+  contactEmail?: Volatile<string>;
+  ieeeApiKeyEnv?: string;
+  acmApiKeyEnv?: string;
+  scholarProxyUrl?: Volatile<string>;
+  useScihub?: Volatile<boolean>;
+  scihubBaseUrl?: Volatile<string>;
 }

@@ -1,45 +1,47 @@
 import type { Context } from "@deepseek-ai/cordis";
-import type z from "@deepseek-ai/schemastery";
-import type {} from "@deepseek-ai/dsh-settings";
 import type {} from "@deepseek-ai/dsh-system-prompt";
 import os from "node:os";
 import path from "node:path";
-import type { PapersearchConfig } from "./types";
+import type { PapersearchConfig, PapersearchConfigEntry } from "./types";
 import { papersearchPrompt } from "./help";
-
-/** Namespace this plugin owns in the user-settings document. */
-export const PAPERSEARCH_SETTINGS_NS = "papersearch";
 
 export type ConfigSource = () => PapersearchConfig;
 
-export function installPapersearchSettings<T extends PapersearchConfig>(
+/**
+ * 0.1.7 设置面接线：可编辑字段在 Config schema 上以 .volatile() 声明，
+ * settings 页自动表单直接编辑（写 profile 插件配置），插件实例不重载。
+ * 本函数退化为两件事：
+ * - 快照 ConfigSource：每次调用从 entry 的 Volatile 字段 .get() 组装
+ *   PapersearchConfig 快照——下游（工具层）契约与 0.1.5 完全一致。
+ * - system prompt：文本是纯静态（papersearchPrompt() 零参数），安装时
+ *   发布一次即可——0.1.5 installSection onChange 的重发是同文本的无效
+ *   重发（okf 侧早已删除同款 no-op），不再接线。
+ */
+export function installPapersearchSettings(
   ctx: Context,
-  schema: z<T>,
-  entry: T,
+  entry: PapersearchConfigEntry,
 ): ConfigSource {
-  let source: () => T = () => entry;
-  const getConfig: ConfigSource = () => source();
+  const getConfig: ConfigSource = () => ({
+    pdfDir: entry.pdfDir?.get(),
+    searchTimeoutMs: entry.searchTimeoutMs?.get(),
+    downloadTimeoutMs: entry.downloadTimeoutMs?.get(),
+    coreApiKeyEnv: entry.coreApiKeyEnv,
+    doajApiKeyEnv: entry.doajApiKeyEnv,
+    zenodoAccessTokenEnv: entry.zenodoAccessTokenEnv,
+    semanticScholarApiKeyEnv: entry.semanticScholarApiKeyEnv,
+    unpaywallEmail: entry.unpaywallEmail?.get(),
+    contactEmail: entry.contactEmail?.get(),
+    ieeeApiKeyEnv: entry.ieeeApiKeyEnv,
+    acmApiKeyEnv: entry.acmApiKeyEnv,
+    scholarProxyUrl: entry.scholarProxyUrl?.get(),
+    useScihub: entry.useScihub?.get(),
+    scihubBaseUrl: entry.scihubBaseUrl?.get(),
+  });
 
-  let disposePrompt = (): void => {};
-  const publishPrompt = (): void => {
-    disposePrompt();
-    disposePrompt = ctx.systemPrompt.section({
-      name: "plugin:papersearch",
-      order: 120,
-      text: papersearchPrompt(),
-    });
-  };
-  publishPrompt();
-
-  ctx.inject(["settings"], (sctx) => {
-    // Same fallback contract as dsh-csw: when no settings provider is
-    // present the composition entry stays the config source.
-    sctx.settings.installSection(ctx, PAPERSEARCH_SETTINGS_NS, schema, entry, {
-      setSource: (current) => {
-        source = current;
-      },
-      onChange: publishPrompt,
-    });
+  ctx.systemPrompt.section({
+    name: "plugin:papersearch",
+    order: 120,
+    text: papersearchPrompt(),
   });
 
   return getConfig;

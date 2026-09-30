@@ -1,7 +1,7 @@
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
-import { fetchWithRetry, HttpError, USER_AGENT } from "./http";
+import { fetchWithRetry, getJson, HttpError, USER_AGENT } from "./http";
 import { currentSourceKeys, sciHubEnabled } from "./keys";
 import { bareDoi, compactSearchResult, extractDoi, type CompactSearchResult, type Paper } from "./paper";
 import { arxivSource } from "./sources/arxiv";
@@ -93,7 +93,7 @@ export async function searchSources(options: SearchOptions): Promise<CompactSear
   const selected = SOURCES.filter(
     (source) => requested.length === 0 ? active.has(source.id) : requested.includes(source.id),
   );
-  const maxResults = Math.max(1, Math.min(20, options.maxResults ?? 5));
+  const maxResults = Math.max(1, Math.min(50, options.maxResults ?? 5));
 
   const settled = await Promise.all(
     selected.map(async (source) => {
@@ -551,6 +551,171 @@ export async function downloadAll(
     }
   };
   await Promise.all(Array.from({ length: Math.min(concurrency, tasks.length) }, () => worker()));
+  if (options.signal?.aborted) {
+    const error = new Error("aborted");
+    error.name = "AbortError";
+    throw error;
+  }
+  return results;
+}
+
+/** Semantic Scholar DOI-exact lookup for the acquisition chain: the card's
+ * openAccessPdf link plus its title. A 404 (S2 does not know the DOI) and
+ * any network failure both yield undefined — the repository / unpaywall /
+ * Sci-Hub chain below still applies. The metadata call is capped at 30s
+ * (JSON endpoint), never the generous PDF download timeout. */
+async function resolveSemanticScholarOaPdf(
+  doi: string,
+  options: { signal?: AbortSignal; timeoutMs?: number },
+): Promise<{ title: string; pdfUrl: string } | undefined> {
+  const key = currentSourceKeys().semanticScholarApiKey;
+  const headers: Record<string, string> = {};
+  if (key) headers["x-api-key"] = key;
+  const url = `https://api.semanticscholar.org/graph/v1/paper/DOI:${encodeURIComponent(doi)}?fields=title,openAccessPdf`;
+  try {
+    const record = await getJson<{ title?: string; openAccessPdf?: { url?: string } | null }>(url, {
+      signal: options.signal,
+      timeoutMs: Math.min(options.timeoutMs ?? 30_000, 30_000),
+      headers,
+    });
+    return { title: record.title?.trim() ?? "", pdfUrl: record.openAccessPdf?.url ?? "" };
+  } catch (error) {
+    if (options.signal?.aborted) throw error;
+    return undefined;
+  }
+}
+
+/** Download one paper by bare DOI — the papersearch_acquire engine. The
+ * chain is DOI-anchored end to end: Semantic Scholar's openAccessPdf first
+ * (the user's requested S2 pass), then the open repositories + unpaywall OA
+ * resolver, then Sci-Hub as the last resort. Files land as doi-<doi>.pdf
+ * with the same sidecar contract as downloadPaper; the exists/replaced
+ * idempotency semantics are identical. Per-DOI failures are returned, never
+ * thrown (except abort). */
+export async function downloadByDoi(
+  doiInput: string,
+  options: DownloadOptions,
+  metadata: { title?: string } = {},
+): Promise<DownloadOutcome> {
+  const doi = bareDoi(doiInput).toLowerCase();
+  const outcome: DownloadOutcome = {
+    source: "doi",
+    paperId: doi || doiInput,
+    status: "failed",
+    title: metadata.title,
+    doi: doi || undefined,
+  };
+  // bareDoi normalizes but never validates — a non-DOI string would otherwise
+  // burn the whole chain (S2 404 → repository miss → sci-hub miss) before
+  // failing. Reject up front: DOI body = 10.<registrant>/<suffix>.
+  if (!/^10\.\d{4,}\//.test(doi)) {
+    outcome.error = `not a DOI: ${doiInput}`;
+    return outcome;
+  }
+
+  const fragment = safeFileFragment(`doi-${doi}`);
+  const expected = path.join(options.dir, `${fragment}.pdf`);
+  let destinationTaken = false;
+  try {
+    const info = await stat(expected);
+    if (info.isFile()) {
+      destinationTaken = true;
+      const sidecar = await readSidecar(expected);
+      if (sidecar && sidecar.sha256 === (await sha256OfFile(expected))) {
+        outcome.status = "exists";
+        outcome.path = expected;
+        outcome.bytes = info.size;
+        return outcome;
+      }
+    }
+  } catch {
+    // not present — proceed
+  }
+
+  const candidates: Array<{ url: string; identity: DownloadIdentity }> = [];
+  // Step 1 (requested S2 pass): DOI-exact card → openAccessPdf is DOI-anchored.
+  const s2 = await resolveSemanticScholarOaPdf(doi, options);
+  const title = (metadata.title?.trim() || s2?.title || "").trim();
+  if (title && !outcome.title) outcome.title = title;
+  if (s2?.pdfUrl.startsWith("http")) candidates.push({ url: s2.pdfUrl, identity: "doi-url" });
+
+  if (options.allowFallback !== false) {
+    // Step 2: open repositories (openaire/core/europepmc/pmc) by DOI, then
+    // unpaywall — both DOI-anchored.
+    const repositoryUrls = await collectRepositoryCandidates(
+      repositoryAdapters(),
+      { doi, title },
+      { signal: options.signal, timeoutMs: options.timeoutMs },
+    );
+    candidates.push(...repositoryUrls);
+    try {
+      const fallback = await resolveOaPdfUrl(doi, { signal: options.signal, timeoutMs: options.timeoutMs });
+      if (fallback) candidates.push({ url: fallback, identity: "doi-url" });
+    } catch {
+      // unpaywall unavailable — skip silently
+    }
+    // Step 3: Sci-Hub last resort (mirror rotation + health store inside).
+    if (sciHubEnabled()) {
+      const resolved = await resolveSciHubPdfUrl(doi, {
+        signal: options.signal,
+        timeoutMs: options.timeoutMs,
+      });
+      if (resolved) candidates.push({ url: resolved.url, identity: "scihub" });
+    }
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const saved = await fetchPdf(candidate.url, options.dir, fragment, {
+        signal: options.signal,
+        timeoutMs: options.timeoutMs,
+        meta: {
+          doi,
+          title,
+          source: "doi",
+          sourceUrl: candidate.url,
+          identity: candidate.identity,
+        },
+      });
+      outcome.status = destinationTaken ? "replaced" : "downloaded";
+      outcome.path = saved.path;
+      outcome.bytes = saved.bytes;
+      return outcome;
+    } catch (error) {
+      if (options.signal?.aborted) break;
+      // try the next candidate
+      void error;
+    }
+  }
+
+  outcome.error = "no usable PDF found after Semantic Scholar, OA repositories, unpaywall and Sci-Hub (paper may be paywalled or absent from the mirrors)";
+  return outcome;
+}
+
+/** Bounded-concurrency batch acquisition by DOI (the papersearch_acquire
+ *  engine). Mirrors downloadAll: AbortError on abort, onOutcome fires once
+ *  per settled DOI in completion order. */
+export async function acquireByDoi(
+  dois: string[],
+  options: DownloadOptions & {
+    concurrency?: number;
+    onOutcome?: (outcome: DownloadOutcome) => void;
+  },
+): Promise<DownloadOutcome[]> {
+  const concurrency = Math.max(1, Math.min(5, options.concurrency ?? 3));
+  const results: DownloadOutcome[] = [];
+  let cursor = 0;
+  const worker = async (): Promise<void> => {
+    while (cursor < dois.length) {
+      if (options.signal?.aborted) return;
+      const doi = dois[cursor]!;
+      cursor += 1;
+      const outcome = await downloadByDoi(doi, options);
+      results.push(outcome);
+      options.onOutcome?.(outcome);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, dois.length) }, () => worker()));
   if (options.signal?.aborted) {
     const error = new Error("aborted");
     error.name = "AbortError";
