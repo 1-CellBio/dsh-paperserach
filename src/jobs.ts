@@ -3,8 +3,10 @@ import type { JobOutcome } from "@deepseek-ai/dsh-jobs";
 import type { ToolRunContext } from "@deepseek-ai/dsh-tools";
 import path from "node:path";
 import "./kinds";
+import { sciHubEnabled } from "./keys";
 import { LineLog } from "./log-buffer";
 import { acquireByDoi, downloadAll, pickDownloadable, searchSources, type DownloadOutcome } from "./registry";
+import { ingestDetailClause, stagedFiles, type IngestHandoff } from "./staging";
 
 /** Start one papersearch background job through the ctx.jobs seam.
  * @param ctx - plugin context; must expose the jobs service when background is requested.
@@ -151,13 +153,13 @@ export async function runFetchJob(
         log.append(
           outcome.status === "failed"
             ? `failed ${id}: ${outcome.error ?? "unknown error"}`
-            : `${outcome.status} ${id} -> ${outcome.path ?? ""}`,
+            : `${outcome.status} ${id} -> ${outcome.path ?? outcome.libraryPaper ?? ""}`,
         );
       },
     },
   );
   const counts = outcomeCounts(results);
-  log.append(`downloaded ${counts.downloaded}, replaced ${counts.replaced}, exists ${counts.exists}, failed ${counts.failed}`);
+  log.append(countsLine(counts));
   return {
     query: args.query,
     sources: search.sourcesUsed,
@@ -171,30 +173,50 @@ export async function runFetchJob(
 }
 
 /** One-line completion detail: outcome counts plus the staged file names
- *  okf_ingest needs (relative names resolve against the download dir).
+ *  (relative names resolve against the download dir) and whether ingest started.
  * @param result - the settled fetch manifest.
+ * @param ingest - the ingest consumer's answer to the staged-files hand-off, if any.
  * @returns the job outcome detail string. */
-export function fetchJobDetail(result: FetchJobResult): string {
+export function fetchJobDetail(result: FetchJobResult, ingest?: IngestHandoff): string {
   const counts = outcomeCounts(result.results);
   const staged = result.results
     .filter((outcome) => outcome.status !== "failed")
     .flatMap((outcome) => (outcome.path ? [path.basename(outcome.path)] : []));
-  return `downloaded ${counts.downloaded}, replaced ${counts.replaced}, exists ${counts.exists}, failed ${counts.failed} — dir ${result.dir}`
-    + (staged.length > 0 ? ` (${staged.join(", ")})` : "");
+  return `${countsLine(counts)} — dir ${result.dir}`
+    + (staged.length > 0 ? ` (${staged.join(", ")})` : "")
+    + ingestDetailClause(stagedFiles(result.results).length, ingest);
 }
 
-function outcomeCounts(results: readonly DownloadOutcome[]): { downloaded: number; replaced: number; exists: number; failed: number } {
+interface OutcomeCounts {
+  downloaded: number;
+  replaced: number;
+  exists: number;
+  inLibrary: number;
+  failed: number;
+}
+
+function outcomeCounts(results: readonly DownloadOutcome[]): OutcomeCounts {
   let downloaded = 0;
   let replaced = 0;
   let exists = 0;
+  let inLibrary = 0;
   let failed = 0;
   for (const outcome of results) {
     if (outcome.status === "downloaded") downloaded += 1;
     else if (outcome.status === "replaced") replaced += 1;
     else if (outcome.status === "exists") exists += 1;
+    else if (outcome.status === "in-library") inLibrary += 1;
     else failed += 1;
   }
-  return { downloaded, replaced, exists, failed };
+  return { downloaded, replaced, exists, inLibrary, failed };
+}
+
+/** `downloaded a, replaced b, exists c[, in-library d], failed e` — the
+ * in-library count appears only when the library answered some DOI. */
+function countsLine(counts: OutcomeCounts): string {
+  return `downloaded ${counts.downloaded}, replaced ${counts.replaced}, exists ${counts.exists}`
+    + (counts.inLibrary > 0 ? `, in-library ${counts.inLibrary}` : "")
+    + `, failed ${counts.failed}`;
 }
 
 /** One papersearch_acquire run, validated and resolved by the tools layer. */
@@ -214,7 +236,7 @@ export interface AcquireJobResult {
 }
 
 /** DOI acquisition pipeline behind papersearch_acquire: S2 openAccessPdf →
- *  OA repositories + unpaywall → Sci-Hub, one log line per settled DOI. */
+ *  OA repositories + unpaywall → Sci-Hub (unless `useScihub` is turned off), one log line per settled DOI. */
 export async function runAcquireJob(
   args: AcquireJobArgs,
   refreshKeys: () => Promise<void>,
@@ -223,7 +245,7 @@ export async function runAcquireJob(
 ): Promise<AcquireJobResult> {
   await refreshKeys();
   throwIfAborted(signal);
-  log.append(`acquire ${args.dois.length} DOI(s) into ${args.dir} (chain: semantic-scholar → oa-repositories/unpaywall → sci-hub)`);
+  log.append(`acquire ${args.dois.length} DOI(s) into ${args.dir} (chain: semantic-scholar → oa-repositories/unpaywall${sciHubEnabled() ? " → sci-hub" : "; sci-hub off"})`);
   const results = await acquireByDoi(args.dois, {
     dir: args.dir,
     signal,
@@ -237,23 +259,47 @@ export async function runAcquireJob(
     },
   });
   const counts = outcomeCounts(results);
-  log.append(`downloaded ${counts.downloaded}, replaced ${counts.replaced}, exists ${counts.exists}, failed ${counts.failed}`);
+  log.append(countsLine(counts));
   return { requested: args.dois.length, results, dir: args.dir };
 }
 
-/** One-line completion detail: outcome counts plus the staged file names
- *  okf_ingest needs (relative names resolve against the download dir). */
-export function acquireJobDetail(result: AcquireJobResult): string {
+/** One-line completion detail: outcome counts, the staged file names
+ *  (relative names resolve against the download dir), and whether ingest started.
+ * @param result - the settled acquire manifest.
+ * @param ingest - the ingest consumer's answer to the staged-files hand-off, if any.
+ * @returns the job outcome detail string. */
+export function acquireJobDetail(result: AcquireJobResult, ingest?: IngestHandoff): string {
   const counts = outcomeCounts(result.results);
   const staged = result.results
     .filter((outcome) => outcome.status !== "failed")
     .flatMap((outcome) => (outcome.path ? [path.basename(outcome.path)] : []));
   const missed = result.results
     .filter((outcome) => outcome.status === "failed")
+    .map(describeMiss);
+  const inconclusive = result.results.some((outcome) => outcome.diagnosis?.verdict === "inconclusive");
+  const inLibrary = result.results
+    .filter((outcome) => outcome.status === "in-library")
+    .map((outcome) => `${outcome.doi ?? outcome.paperId} → ${outcome.libraryPaper ?? "library"}`);
+  const conflicts = result.results
+    .filter((outcome) => outcome.identityConflict !== undefined)
     .map((outcome) => outcome.doi ?? outcome.paperId);
-  return `downloaded ${counts.downloaded}, replaced ${counts.replaced}, exists ${counts.exists}, failed ${counts.failed} — dir ${result.dir}`
+  return `${countsLine(counts)} — dir ${result.dir}`
     + (staged.length > 0 ? ` (${staged.join(", ")})` : "")
-    + (missed.length > 0 ? ` — no full text for: ${missed.join(", ")}` : "");
+    + (inLibrary.length > 0 ? ` — already in the library, no download needed: ${inLibrary.join("; ")}` : "")
+    + (missed.length > 0 ? ` — no full text for: ${missed.join(", ")}` : "")
+    + (inconclusive ? " — inconclusive is not proof of a paywall: fix the named setting or retry later" : "")
+    + (conflicts.length > 0 ? ` — identical bytes already stored under another DOI (not saved): ${conflicts.join(", ")}` : "")
+    + ingestDetailClause(stagedFiles(result.results).length, ingest);
+}
+
+/** `<doi> (<verdict>[: <first failing step and why>])` for one failed acquisition. */
+function describeMiss(outcome: DownloadOutcome): string {
+  const id = outcome.doi ?? outcome.paperId;
+  const diagnosis = outcome.diagnosis;
+  if (diagnosis === undefined) return id;
+  if (diagnosis.verdict === "no-open-access-copy") return `${id} (${diagnosis.verdict})`;
+  const first = diagnosis.stages.find((stage) => stage.result === "unavailable" || stage.result === "unconfigured");
+  return first === undefined ? `${id} (${diagnosis.verdict})` : `${id} (${diagnosis.verdict}: ${first.stage} ${first.detail ?? first.result})`;
 }
 
 function throwIfAborted(signal: AbortSignal): void {

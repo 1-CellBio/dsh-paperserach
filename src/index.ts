@@ -35,6 +35,7 @@ export const Config = z.object({
   scholarProxyUrl: z.string().default("").volatile(),
   useScihub: z.boolean().default(true).volatile(),
   scihubBaseUrl: z.string().default("").volatile(),
+  allowTitleMatch: z.boolean().default(true).volatile(),
 });
 
 export function apply(ctx: Context, config: Config): void {

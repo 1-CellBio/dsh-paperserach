@@ -36,6 +36,7 @@ export function installPapersearchSettings(
     scholarProxyUrl: entry.scholarProxyUrl?.get(),
     useScihub: entry.useScihub?.get(),
     scihubBaseUrl: entry.scihubBaseUrl?.get(),
+    allowTitleMatch: entry.allowTitleMatch?.get(),
   });
 
   ctx.systemPrompt.section({

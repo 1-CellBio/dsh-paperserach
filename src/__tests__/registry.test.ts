@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { downloadAll, downloadPaper, fetchPdf, pickDownloadable, SOURCE_IDS } from "../registry";
 import { safeFileFragment } from "../sources/adapter";
 import { qs } from "../http";
+import { refreshSourceKeys } from "../keys";
 import { expandDirTemplate } from "../settings";
 
 const pdfMagic = Buffer.concat([
@@ -194,6 +195,7 @@ describe("downloadPaper", () => {
   });
   afterEach(async () => {
     vi.unstubAllGlobals();
+    await refreshSourceKeys({});
     await rm(dir, { recursive: true, force: true });
   });
 
@@ -297,7 +299,7 @@ describe("downloadPaper", () => {
     expect(outcome.path).toBe(path.join(dir, "openalex-W123.pdf"));
     // Only the DOI query ran against openaire — the title query never joined.
     expect(openaireQueries).toHaveLength(1);
-    expect(openaireQueries[0]).toContain("keywords=10.1109%2Ftest.2020");
+    expect(openaireQueries[0]).toContain("doi=10.1109%2Ftest.2020");
     const sidecar = await readSidecarFile(path.join(dir, "openalex-W123.pdf"));
     expect(sidecar.identity).toBe("doi-url");
     expect(sidecar.sourceUrl).toBe("https://repo.example/paper.pdf");
@@ -305,8 +307,8 @@ describe("downloadPaper", () => {
     expect(sidecar.source).toBe("openalex");
   });
 
-  it("repository fallback matched only by title is recorded as title-fallback", async () => {
-    const openaireQueries: string[] = [];
+  /** Network stub where OpenAIRE answers a title query with one PDF link and no DOI. */
+  function stubTitleOnlyRepository(openaireQueries: string[]): void {
     vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => {
       const raw = String(url);
       if (raw.startsWith("https://api.openaire.eu/search/publications")) {
@@ -321,9 +323,32 @@ describe("downloadPaper", () => {
       if (/^https:\/\/sci-hub\./.test(raw)) return htmlResponse("<html>article not found</html>");
       return fakePdfResponse();
     }));
+  }
+
+  it("repository fallback matched only by title is refused when allowTitleMatch is switched off", async () => {
+    await refreshSourceKeys({ allowTitleMatch: false });
+    const openaireQueries: string[] = [];
+    stubTitleOnlyRepository(openaireQueries);
+
+    const outcome = await downloadPaper("openalex", "W200", { dir }, { title: "A Paper" });
+    expect(outcome.status).toBe("failed");
+    expect(openaireQueries).toHaveLength(1); // the title query still ran — the hit was dropped, not the query
+    expect(outcome.titleMatchSkipped).toBe(1);
+    expect(outcome.error).toContain("title-only candidate(s) skipped");
+    expect(outcome.error).toContain("allowTitleMatch");
+    // Nothing was saved: no pdf, no sidecar.
+    expect(await readdir(dir)).toEqual([]);
+  });
+
+  it("repository fallback matched only by title is saved as title-fallback by default", async () => {
+    await refreshSourceKeys({});
+    const openaireQueries: string[] = [];
+    stubTitleOnlyRepository(openaireQueries);
 
     const outcome = await downloadPaper("openalex", "W200", { dir }, { title: "A Paper" });
     expect(outcome.status).toBe("downloaded");
+    expect(outcome.identity).toBe("title-fallback");
+    expect(outcome.titleMatchSkipped).toBeUndefined();
     // No DOI on the card → only the title phase ran.
     expect(openaireQueries).toHaveLength(1);
     expect(openaireQueries[0]).toContain("keywords=A+Paper");
@@ -333,7 +358,8 @@ describe("downloadPaper", () => {
     expect(sidecar.title).toBe("A Paper");
   });
 
-  it("a Sci-Hub download is recorded as identity scihub", async () => {
+  it("a Sci-Hub download is recorded as identity scihub (only when opted in)", async () => {
+    await refreshSourceKeys({ useScihub: true });
     vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => {
       const raw = String(url);
       if (raw.startsWith("https://api.openaire.eu/search/publications")) return jsonResponse({ response: { results: 0, result: [] } });

@@ -190,6 +190,18 @@ export function SettingsCard(props: PapersearchCardProps) {
         onEdit={(text) => { props.edit("scihubBaseUrl", text); }}
         onReset={() => { props.resetField("scihubBaseUrl"); }}
       />
+      <SettingsValueField
+        id="plugin-config-papersearch-allow-title-match"
+        label={t("settings.allowTitleMatch")}
+        hint={t("settings.allowTitleMatchHint")}
+        overriddenLabel={t("settings.overridden")}
+        resetLabel={t("settings.reset")}
+        invalidLabel={t("settings.invalidBoolean")}
+        disabled={disabled}
+        {...state.allowTitleMatch}
+        onEdit={(text) => { props.edit("allowTitleMatch", text); }}
+        onReset={() => { props.resetField("allowTitleMatch"); }}
+      />
       </div>
     </SettingsForm>
   );

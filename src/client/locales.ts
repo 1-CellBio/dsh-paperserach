@@ -64,6 +64,8 @@ export type PapersearchLocaleKey =
   | "settings.downloadTimeoutMsHint"
   | "settings.useScihub"
   | "settings.useScihubHint"
+  | "settings.allowTitleMatch"
+  | "settings.allowTitleMatchHint"
   | "search.title"
   | "search.searching"
   | "search.truncated"
@@ -140,7 +142,9 @@ export const zh: Record<PapersearchLocaleKey, string> = {
   "settings.downloadTimeoutMs": "下载超时 (ms)",
   "settings.downloadTimeoutMsHint": "单篇 PDF 下载上限，默认 300000",
   "settings.useScihub": "启用 Sci-Hub 回退",
-  "settings.useScihubHint": "true = 最后的 PDF 回退走 Sci-Hub 镜像（默认 true）",
+  "settings.useScihubHint": "true = 最后的 PDF 回退走 Sci-Hub 镜像（默认 true；这类镜像提供受版权保护的全文，使用须遵守所在地区与机构的政策）",
+  "settings.allowTitleMatch": "接受仅按标题匹配的 PDF",
+  "settings.allowTitleMatchHint": "true（默认）= 开放仓库按标题（而非 DOI）命中的 PDF 也会保存，身份记为 title-fallback；入库后 okf 会核对请求 DOI 与编译出的论文 DOI，不一致即标记 identityMismatch 并撤销其 claims。false = 丢弃这类命中",
   "search.title": "文献检索",
   "search.searching": "正在检索文献…",
   "search.truncated": "命中结果超过上限，列表已截断",
@@ -218,7 +222,9 @@ export const en: Record<PapersearchLocaleKey, string> = {
   "settings.downloadTimeoutMs": "Download timeout (ms)",
   "settings.downloadTimeoutMsHint": "Per-paper PDF download cap; default 300000",
   "settings.useScihub": "Enable Sci-Hub fallback",
-  "settings.useScihubHint": "true = last PDF fallback via Sci-Hub mirrors (default true)",
+  "settings.useScihubHint": "true = last PDF fallback via Sci-Hub mirrors (default true; these mirrors serve copyrighted full text — follow your region's and institution's policy)",
+  "settings.allowTitleMatch": "Accept title-only PDF matches",
+  "settings.allowTitleMatchHint": "true (default) = also save PDFs that an open repository matched by title instead of DOI, recorded as identity title-fallback; after ingest okf compares the requested DOI with the compiled paper and flags a difference as identityMismatch (claims deprecated). false = drop such hits",
   "search.title": "Paper search",
   "search.searching": "Searching papers…",
   "search.truncated": "Results exceeded the cap; the list was truncated",

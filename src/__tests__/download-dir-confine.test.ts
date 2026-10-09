@@ -117,7 +117,7 @@ describe("papersearch_download_scihub dir confinement", () => {
   it("rejects dir values that escape the download root before any network call", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
-    const scihub = toolByName("papersearch_download_scihub", () => ({ pdfDir: base, useScihub: false }));
+    const scihub = toolByName("papersearch_download_scihub", () => ({ pdfDir: base, useScihub: true }));
     for (const dir of ["../evil", "/tmp"]) {
       await expect(
         scihub.execute({ identifier: "10.1000/fake", dir }, execWith()),
@@ -128,12 +128,26 @@ describe("papersearch_download_scihub dir confinement", () => {
 
   it("downloads into a relative subdir when given a direct PDF url", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => fakePdfResponse()));
-    const scihub = toolByName("papersearch_download_scihub", () => ({ pdfDir: base, useScihub: false }));
+    const scihub = toolByName("papersearch_download_scihub", () => ({ pdfDir: base, useScihub: true }));
     const outcome = await scihub.execute(
       { identifier: "https://example.com/paper.pdf", dir: "scihub-staging" },
       execWith(),
     ) as { status: string; path: string };
     expect(outcome.status).toBe("downloaded");
     expect(path.dirname(outcome.path)).toBe(path.join(base, "scihub-staging"));
+  });
+
+  it("obeys the useScihub switch: off (the default) → status disabled, no network call, nothing written", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const scihub = toolByName("papersearch_download_scihub", () => ({ pdfDir: base, useScihub: false }));
+    const outcome = await scihub.execute({ identifier: "10.1000/fake" }, execWith()) as { status: string; error: string; hint: string };
+    expect(outcome.status).toBe("disabled");
+    expect(outcome.error).toContain("useScihub");
+    expect(outcome.hint).toContain("papersearch_acquire");
+    expect(fetchMock).not.toHaveBeenCalled();
+    // The switch is checked before path handling, so an escaping dir is not even evaluated.
+    const escaping = await scihub.execute({ identifier: "10.1000/fake", dir: "../evil" }, execWith()) as { status: string };
+    expect(escaping.status).toBe("disabled");
   });
 });

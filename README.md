@@ -16,12 +16,12 @@
 
 ## 这是什么
 
-[dsh-papersearch](https://github.com/1-CellBio/dsh-papersearch) 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`）的插件，把 [openags/paper-search-mcp](https://github.com/openags/paper-search-mcp) 的**全部 21 个源**用**原生 TypeScript 完全重写**：多源并行检索学术 API，并把 PDF 下载到 **dsh-okf 的源文件目录**（`OKF/sources/pdfs`），让 `okf_ingest` 直接收录编译。
+[dsh-papersearch](https://github.com/1-CellBio/dsh-papersearch) 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`）的插件，把 [openags/paper-search-mcp](https://github.com/openags/paper-search-mcp) 的**全部 21 个源**用**原生 TypeScript 完全重写**：多源并行检索学术 API，并把 PDF 下载到 **dsh-okf 的源文件目录**（`OKF/sources/pdfs`）；落盘后自动交给 dsh-okf 摄取编译（见下文「自动摄取」）。
 
 ```text
 papersearch_search / papersearch_fetch   ←  21 个学术源（纯 TS 适配器）
-                 ↓  PDF 落盘 OKF/sources/pdfs
-            okf_ingest（dsh-okf）         ←  提取 / 编译 / 概念化
+                 ↓  PDF 落盘 OKF/sources/pdfs，并发出 papersearch/staged 事件
+        自动 okf-ingest 作业（dsh-okf）      ←  提取 / 编译 / 概念化
                  ↓
        okf_search / okf_graph / okf_coverage …
 ```
@@ -34,10 +34,20 @@ papersearch_search / papersearch_fetch   ←  21 个学术源（纯 TS 适配器
 |---|---|
 | `papersearch_search` | 多源并行检索，去重后返回论文卡片（标题 / 作者 / 年份 / DOI / pdf_url / 摘要节选） |
 | `papersearch_fetch` | 一句话闭环：检索 → 挑选可下载的前 N 篇 → 批量下载进 OKF 源目录，返回逐篇清单 |
-| `papersearch_download` | 按源 + paper_id 精确下载单篇（幂等，已存在则跳过；OA 回退链失败后走 Sci-Hub 末位兜底） |
+| `papersearch_download` | 按源 + paper_id 精确下载单篇（幂等，已存在则跳过；OA 回退链失败后走 Sci-Hub 末位兜底，`useScihub=false` 可关闭） |
 | `papersearch_download_scihub` | 末位兜底：按 DOI / 标题 / PMID / URL 直接从 Sci-Hub 镜像下载（托管付费墙论文，谨慎使用） |
+| `papersearch_acquire` | 按 DOI 批量获取全文 PDF（Semantic Scholar openAccessPdf → 开放仓库 + unpaywall → Sci-Hub；库内已覆盖的 DOI 直接答 `in-library`），后台作业，逐 DOI 诊断失败原因 |
 | `papersearch_sources` | 列出可用的源连接器 |
 | `papersearch_help` | 使用说明 + 可复制示例提问 |
+
+### 自动摄取（papersearch → okf）
+
+`papersearch_fetch` / `papersearch_acquire` / `papersearch_download` / `papersearch_download_scihub` 在 PDF 落盘后（状态 `downloaded` / `replaced` / `exists`）向宿主派发 `papersearch/staged` 事件（`ctx.serial`，载荷 = 触发的 agent、工具名、PDF 绝对路径列表）。**dsh-okf 响应该事件，自己启动一个 `okf-ingest` 后台作业**（归属同一 agent，完成时同样通知会话），模型不必再调用 `okf_ingest`：
+
+- 同步结果的 `ingest` 字段（`{ status: "started", jobId, files }`）与后台作业完成详情都会点名该摄取作业，`nextStep` 明确要求「不要重复调用 `okf_ingest`」。
+- 开关在 okf 一侧：okf 设置 `autoIngest`（默认开）。关闭、okf 未加载、文件不在 okf 自己的源目录（`pdfDir`）之内、或作业无法启动时，结果写明 `not-started` 及原因，并保留「手工 `okf_ingest`」的指示。
+- papersearch 自身不依赖 dsh-okf（插件独立发布）；没有监听者时行为与以往一致。
+- 被 `job_kill` 取消的后台作业不会派发事件。
 
 ## 源能力（21 核心 + 2 key 门控）
 
@@ -51,7 +61,7 @@ papersearch_search / papersearch_fetch   ←  21 个学术源（纯 TS 适配器
 | semantic | ✅ | ✅（OA） | Graph API；可选 API key 提升限额 |
 | crossref | ✅ | — | works API 元数据 |
 | openalex | ✅ | —（pdf_url 进 fetch 池） | 倒排索引摘要重建 |
-| pmc | ✅ | ✅（OA） | eutils + PMC OA 服务 |
+| pmc | ✅ | ✅（OA） | eutils + PMC Open Access 桶（`pmc-oa-opendata`，AWS 开放数据，纯 HTTPS；旧 `oa.fcgi` 服务已退役） |
 | core | ✅ | ✅ | 聚合仓；API key 免费申请，未配置走匿名限额 |
 | europepmc | ✅ | —（OA pdf_url） | 生物医学，覆盖 MED + PMC |
 | dblp | ✅ | — | 计算机科学书目，XML API |
@@ -66,7 +76,9 @@ papersearch_search / papersearch_fetch   ←  21 个学术源（纯 TS 适配器
 | ieee | ✅（key 门控） | — | Xplore 元数据 API v1；配 key 才出现在源列表（上游同款门控，但为真实实现而非空壳） |
 | acm | key 门控 | — | ACM 无公开元数据 API；配 key 后源可见但搜索会给出替代建议（crossref/semantic 覆盖 ACM） |
 
-**下载回退链**（源无原生 PDF 时依次尝试，全部候选校验 PDF 魔数）：源原生直链 → 搜索卡片 pdf_url → 开放仓库按 DOI/标题检索（openaire → core → europepmc → pmc）→ unpaywall OA 解析 → **Sci-Hub 镜像列表**（默认开启，自动轮换 + 镜像健康评分，末位兜底）。
+**下载回退链**（源无原生 PDF 时依次尝试，全部候选校验 PDF 魔数）：源原生直链 → 搜索卡片 pdf_url → 开放仓库按 DOI 检索（openaire → core → europepmc → pmc；只按标题命中的 PDF 默认保留，身份记为 `title-fallback`，入库后 okf 核对请求 DOI，不一致标记 `identityMismatch`；`allowTitleMatch=false` 则丢弃）→ unpaywall OA 解析 → **Sci-Hub 镜像列表**（默认开启，`useScihub=false` 可关闭；自动轮换 + 镜像健康评分，末位兜底）。
+
+**仓库回退的实测要点**（2026-10 活体探测）：DOI 查询在 OpenAIRE 走 `doi=` 过滤（放进 `keywords=` 会得到 HTTP 409 语法错误），在 CORE 走带引号的 `doi:"…"` 字段查询（裸 DOI 的斜杠会被当作正则，返回 500）。Europe PMC 的 `?pdf=render` 链接在 Cloudflare 质询之后，脚本客户端一律 403；因此 Europe PMC / PMC 命中且 DOI 一致、带 PMCID 时，先取 **PMC Open Access 桶**里的 PDF（`<PMCID>.<版本>/<PMCID>.<版本>.pdf`，取最新版本），再退回仓库自己的链接。不在开放获取子集的文章在桶中没有 PDF，需手动下载后 `okf_ingest`。相同的候选链接只尝试一次。
 
 **易碎源提示**：google_scholar / citeseerx / base / ssrn 属反爬型（验证码、机构 IP 限制），单源失败会出现在 errors map 里，属预期行为；搜索工具会照常返回其余源的结果。
 
@@ -109,8 +121,9 @@ dsh plugin --profile web add dsh-okf
 | `ieeeApiKeyEnv` | `IEEE_API_KEY` | IEEE Xplore key 的凭据引用（激活 ieee 源） |
 | `acmApiKeyEnv` | `ACM_API_KEY` | ACM key 的凭据引用（源可见，无开放 API，仅提示） |
 | `scholarProxyUrl` | 空 | Google Scholar 正向代理（http/socks5） |
-| `useScihub` | `true` | 是否启用 Sci-Hub 末位回退（回退链第 5 步） |
+| `useScihub` | `true` | 是否启用 Sci-Hub 末位回退（回退链第 5 步；`papersearch_download_scihub` 遵守同一开关） |
 | `scihubBaseUrl` | 空（内置列表轮换） | Sci-Hub 镜像，逗号分隔多个即自动轮换 |
+| `allowTitleMatch` | `true` | 开放仓库只按标题（没有 DOI 佐证）命中的 PDF 是否保存；标题相近的可能是另一篇论文，所以这类文件的 sidecar 身份是 `title-fallback`，okf 入库后会核对 DOI（环境变量 `PAPERSEARCH_ALLOW_TITLE_MATCH=false` 同效关闭） |
 
 ### 插件设置卡片（key 填入组件）
 
@@ -152,13 +165,13 @@ HTTP 层内置：礼貌 UA、超时、429/5xx 指数退避重试（Retry-After �
 搜索并下载 5 篇 single-cell RNA-seq tumor microenvironment 的论文，直接进 OKF
 ```
 
-下载完成后继续：`把 OKF/sources/pdfs 里新下的论文编进文库`（okf_ingest）。
+下载完成后无需再说「编进文库」：PDF 会自动摄取（见下文），摄取作业结束时会话收到完成通知。
 
 ## 开发
 
 ```sh
 pnpm install     # 自动链接宿主 @deepseek-ai/* 工作区包
-pnpm test        # 110 个单元测试（fixture 驱动，含代理/仓库回退本地集成 + Sci-Hub 镜像轮换解析）+ live 集成（网络不可用时自动跳过）
+pnpm test        # 208 个单元测试（fixture 驱动，含代理/仓库回退本地集成 + Sci-Hub 镜像轮换解析）+ live 集成（网络不可用时自动跳过）
 pnpm run build   # tsdown 构建 lib/index.js + lib/client.js（设置卡片浏览器包）
 pnpm run smoke   # stub Context 冒烟加载（双 bundle：工具注册 + key 门控 + 设置卡片）
 ```

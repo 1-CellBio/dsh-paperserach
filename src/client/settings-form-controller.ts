@@ -36,6 +36,7 @@ export interface PapersearchSection {
   scholarProxyUrl?: string;
   useScihub?: boolean;
   scihubBaseUrl?: string;
+  allowTitleMatch?: boolean;
   coreApiKeyEnv?: string;
   doajApiKeyEnv?: string;
   zenodoAccessTokenEnv?: string;
@@ -71,6 +72,7 @@ export interface PapersearchCardState extends SettingsFormShell {
   scholarProxyUrl: SettingsFieldState;
   useScihub: SettingsFieldState;
   scihubBaseUrl: SettingsFieldState;
+  allowTitleMatch: SettingsFieldState;
   credentials: Record<CredentialField, CredentialView>;
 }
 
@@ -193,6 +195,7 @@ export class PapersearchSettingsController {
         settingsTextField("scholarProxyUrl"),
         settingsBooleanField("useScihub"),
         settingsTextField("scihubBaseUrl"),
+        settingsBooleanField("allowTitleMatch"),
       ],
       CREDENTIAL_FIELDS.map(field => ({ field, write: text => this.writeKey(field, text) })),
     );
@@ -212,6 +215,7 @@ export class PapersearchSettingsController {
       scholarProxyUrl: this.form.field("scholarProxyUrl"),
       useScihub: this.form.field("useScihub"),
       scihubBaseUrl: this.form.field("scihubBaseUrl"),
+      allowTitleMatch: this.form.field("allowTitleMatch"),
       credentials: credentialViews(CREDENTIAL_FIELDS, field => ({ ...this.form.field(field), ...this.credential[field] })),
     };
   }

@@ -44,9 +44,10 @@ const ctx = {
 };
 
 mod.apply(ctx, mod.Config({}));
-assert.equal(registered.length, 6, `expected 6 tools, got ${registered.map((t) => t.name).join(",")}`);
+assert.equal(registered.length, 7, `expected 7 tools, got ${registered.map((t) => t.name).join(",")}`);
 const names = registered.map((t) => t.name).sort();
 assert.deepEqual(names, [
+  "papersearch_acquire",
   "papersearch_download",
   "papersearch_download_scihub",
   "papersearch_fetch",
