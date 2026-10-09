@@ -1,5 +1,5 @@
 import { getJson, qs } from "../http";
-import { bareDoi, extractDoi, type Paper } from "../paper";
+import { bareDoi, doiQuery, extractDoi, type Paper } from "../paper";
 import type { SearchArgs, SourceAdapter } from "./adapter";
 
 /** OpenAIRE research graph — EU project outputs aggregated from repositories.
@@ -86,7 +86,11 @@ export const openaireSource: SourceAdapter = {
   id: "openaire",
   canDownload: false,
   async search(args: SearchArgs): Promise<Paper[]> {
-    const query = qs({ keywords: args.query, size: args.maxResults, format: "json" });
+    // A DOI must go through the doi filter: as a keyword the slash is a query syntax error (HTTP 409).
+    const doi = doiQuery(args.query);
+    const query = doi
+      ? qs({ doi, size: args.maxResults, format: "json" })
+      : qs({ keywords: args.query, size: args.maxResults, format: "json" });
     const payload = await getJson<OpenAireResponse>(`${SEARCH_URL}?${query}`, {
       signal: args.signal,
       timeoutMs: args.timeoutMs,

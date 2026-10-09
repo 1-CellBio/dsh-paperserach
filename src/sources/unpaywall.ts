@@ -32,6 +32,11 @@ function unpaywallEmail(): string {
   return (keys.unpaywallEmail || keys.contactEmail).trim();
 }
 
+/** True when a contact email is configured; without one every Unpaywall call is refused locally. */
+export function unpaywallConfigured(): boolean {
+  return unpaywallEmail() !== "";
+}
+
 /** Map one Unpaywall record to a paper card. */
 function toPaper(record: UnpaywallResponse): Paper {
   const doi = record.doi ?? "";

@@ -1,6 +1,6 @@
 import { getJson, qs } from "../http";
 import { currentSourceKeys } from "../keys";
-import type { Paper } from "../paper";
+import { doiQuery, type Paper } from "../paper";
 import type { SearchArgs, SourceAdapter } from "./adapter";
 
 /** CORE aggregator — the world's largest collection of open-access
@@ -40,7 +40,10 @@ interface CoreWork {
 
 /** Build the search request; a stored key rides along as a Bearer token. */
 async function searchWorks(args: SearchArgs): Promise<CoreWork[]> {
-  const url = `${SEARCH_URL}?${qs({ q: args.query, limit: args.maxResults })}`;
+  // An unquoted DOI is parsed as a regex at its slash and answered with HTTP 500; field-quote it.
+  const doi = doiQuery(args.query);
+  const q = doi ? `doi:"${doi}"` : args.query;
+  const url = `${SEARCH_URL}?${qs({ q, limit: args.maxResults })}`;
   const key = currentSourceKeys().coreApiKey;
   const headers: Record<string, string> = key ? { Authorization: `Bearer ${key}` } : {};
   const payload = await getJson<{ results?: CoreWork[] }>(url, {

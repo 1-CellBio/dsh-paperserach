@@ -135,11 +135,26 @@ export function currentSourceKeys(): SourceKeys {
 }
 
 /** Whether the Sci-Hub fallback is enabled. Settings boolean wins; env
- * `PAPERSEARCH_USE_SCI_HUB=false` (also 0/off/no) disables; default on. */
+ * `PAPERSEARCH_USE_SCI_HUB=false` (also 0/off/no) disables; default on. The
+ * same switch governs the fallback chain and `papersearch_download_scihub`. */
 export function sciHubEnabled(): boolean {
   const fromSettings = configured.useScihub;
   if (typeof fromSettings === "boolean") return fromSettings;
   const fromEnv = process.env.PAPERSEARCH_USE_SCI_HUB?.trim().toLowerCase();
   if (fromEnv === "0" || fromEnv === "false" || fromEnv === "off" || fromEnv === "no") return false;
   return true;
+}
+
+/** Whether a PDF found only by a title search may be saved. Settings boolean
+ * (`allowTitleMatch`) wins; without one, env `PAPERSEARCH_ALLOW_TITLE_MATCH`
+ * disables on 0/false/off/no; default ON. A title hit can be a different paper
+ * with a similar title and nothing in the payload ties it to the requested
+ * DOI, so such files carry the sidecar identity "title-fallback"; after ingest
+ * dsh-okf compares the requested DOI with the compiled Paper and flags a
+ * difference (identityMismatch, claims deprecated). */
+export function titleMatchAllowed(): boolean {
+  const fromSettings = configured.allowTitleMatch;
+  if (typeof fromSettings === "boolean") return fromSettings;
+  const fromEnv = process.env.PAPERSEARCH_ALLOW_TITLE_MATCH?.trim().toLowerCase();
+  return !(fromEnv === "0" || fromEnv === "false" || fromEnv === "off" || fromEnv === "no");
 }

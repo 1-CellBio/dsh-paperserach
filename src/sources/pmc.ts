@@ -1,14 +1,14 @@
 import { getJson, qs } from "../http";
 import { type Paper } from "../paper";
 import type { SearchArgs, SourceAdapter } from "./adapter";
+import { resolvePmcOpenDataPdfUrl } from "./pmc_open_data";
 
-/** PubMed Central via eutils esearch (pmc db) + the PMC OA web service.
- * OA articles expose a PDF through the oa.fcgi file list, so the source can
+/** PubMed Central via eutils esearch (pmc db). Open-access articles expose a
+ * PDF in the PMC Open Access bucket (see pmc_open_data), so the source can
  * download natively; everything else is metadata. */
 
 const ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi";
 const ESUMMARY_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi";
-const OA_URL = "https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi";
 
 interface ESearchResponse {
   esearchresult?: { idlist?: string[] };
@@ -25,20 +25,6 @@ interface PmcSummary {
   source?: string;
   pubdate?: string;
   articleids?: Array<{ idtype?: string; value?: string }>;
-}
-
-/** Resolve a PMC id (PMCID or PMID) to an OA PDF link via the OA service. */
-async function oaPdfUrl(id: string, options: { signal?: AbortSignal; timeoutMs?: number }): Promise<string> {
-  const query = qs({ id, format: "json" });
-  try {
-    const payload = await getJson<{ files?: Array<{ url?: string; download?: string }> }>(`${OA_URL}?${query}`, {
-      signal: options.signal,
-      timeoutMs: options.timeoutMs,
-    });
-    return payload.files?.find((file) => file.download ?? file.url)?.download ?? payload.files?.[0]?.url ?? "";
-  } catch {
-    return "";
-  }
 }
 
 function toPaper(summary: PmcSummary): Paper {
@@ -84,7 +70,7 @@ export const pmcSource: SourceAdapter = {
     return papers;
   },
   async download(paperId, options) {
-    const pdf = await oaPdfUrl(`PMC${paperId.replace(/^PMC/i, "")}`, options ?? {});
-    return { url: pdf, baseName: `pmc-${paperId}` };
+    const pdf = await resolvePmcOpenDataPdfUrl(paperId, options ?? {});
+    return { url: pdf ?? "", baseName: `pmc-${paperId}` };
   },
 };

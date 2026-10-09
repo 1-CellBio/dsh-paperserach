@@ -120,7 +120,7 @@ describe("downloadByDoi", () => {
     expect(sidecar.sourceUrl).toBe("https://oa.example/x.pdf");
   });
 
-  it("S2 + OA chain all miss → Sci-Hub last resort with identity scihub", async () => {
+  it("S2 + OA chain all miss → Sci-Hub last resort with identity scihub (on by default)", async () => {
     await refreshSourceKeys({ unpaywallEmail: "t@example.org" });
     vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => {
       const raw = String(url);
@@ -138,18 +138,25 @@ describe("downloadByDoi", () => {
     expect(sidecar.sourceUrl).toBe("https://d1.sci-hub.se/paper.pdf");
   });
 
-  it("reports failed with the full chain named when nothing resolves", async () => {
-    await refreshSourceKeys({ unpaywallEmail: "t@example.org" });
+  it("reports failed naming the sources actually consulted: Sci-Hub is listed unless the installation turned it off", async () => {
     vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => {
       const raw = String(url);
       if (raw.startsWith("https://api.semanticscholar.org/")) return httpError(404);
       return tailAllMiss(raw) ?? fakePdfResponse();
     }));
 
-    const outcome = await downloadByDoi("10.5678/nowhere", { dir });
-    expect(outcome.status).toBe("failed");
-    expect(outcome.error).toContain("Semantic Scholar");
-    expect(outcome.error).toContain("Sci-Hub");
+    await refreshSourceKeys({ unpaywallEmail: "t@example.org" });
+    const on = await downloadByDoi("10.5678/nowhere", { dir });
+    expect(on.status).toBe("failed");
+    expect(on.error).toContain("Semantic Scholar, OA repositories, unpaywall and Sci-Hub");
+    expect(on.error).not.toContain("Sci-Hub is off");
+
+    await refreshSourceKeys({ unpaywallEmail: "t@example.org", useScihub: false });
+    const off = await downloadByDoi("10.5678/nowhere", { dir });
+    expect(off.status).toBe("failed");
+    expect(off.error).toContain("Semantic Scholar, OA repositories and unpaywall");
+    expect(off.error).toContain("Sci-Hub is off");
+    expect(off.error).not.toContain("and Sci-Hub");
   });
 
   it("is idempotent: a sidecar-verified file reports exists with zero network calls", async () => {

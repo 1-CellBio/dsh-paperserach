@@ -132,6 +132,13 @@ export function extractDoi(text: string | undefined | null): string {
   return m ? m[0]!.replace(/[.,;)]+$/, "") : "";
 }
 
+/** The lower-cased bare DOI when `query` is nothing but a DOI (bare, `doi:` or doi.org URL form);
+ * "" for titles and keyword queries — a DOI embedded in other words does not count. */
+export function doiQuery(query: string | undefined | null): string {
+  const value = (query ?? "").trim().replace(/^https?:\/\/(dx\.)?doi\.org\//i, "").replace(/^doi:\s*/i, "");
+  return /^10\.\d{4,}\/\S+$/.test(value) ? value.toLowerCase() : "";
+}
+
 /** Normalize https://doi.org/… to a bare DOI. */
 export function bareDoi(raw: string | undefined | null): string {
   const value = (raw ?? "").trim();

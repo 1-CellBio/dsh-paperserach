@@ -29,6 +29,8 @@ export interface PapersearchConfig {
   useScihub?: boolean;
   /** Sci-Hub mirror base URL(s), comma-separated; empty = built-in list (rotated). */
   scihubBaseUrl?: string;
+  /** Keep PDFs found only by a title search (default true; they are saved with identity "title-fallback" and dsh-okf compares the requested DOI with the compiled paper after ingest). */
+  allowTitleMatch?: boolean;
 }
 
 /**
@@ -51,4 +53,5 @@ export interface PapersearchConfigEntry {
   scholarProxyUrl?: Volatile<string>;
   useScihub?: Volatile<boolean>;
   scihubBaseUrl?: Volatile<string>;
+  allowTitleMatch?: Volatile<boolean>;
 }

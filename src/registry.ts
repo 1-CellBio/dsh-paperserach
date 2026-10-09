@@ -2,8 +2,17 @@ import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { fetchWithRetry, getJson, HttpError, USER_AGENT } from "./http";
-import { currentSourceKeys, sciHubEnabled } from "./keys";
+import {
+  findSha256Conflict,
+  IdentityConflictError,
+  loadLibraryDoiIndex,
+  normalizeDoi,
+  sidecarScanDirs,
+  withStoreLock,
+} from "./identity";
+import { currentSourceKeys, sciHubEnabled, titleMatchAllowed } from "./keys";
 import { bareDoi, compactSearchResult, extractDoi, type CompactSearchResult, type Paper } from "./paper";
+import { resolvePmcOpenDataPdfUrl } from "./sources/pmc_open_data";
 import { arxivSource } from "./sources/arxiv";
 import { baseSource } from "./sources/base";
 import { biorxivSource, medrxivSource } from "./sources/biorxiv";
@@ -22,7 +31,7 @@ import { pmcSource } from "./sources/pmc";
 import { pubmedSource } from "./sources/pubmed";
 import { semanticSource } from "./sources/semantic";
 import { ssrnSource } from "./sources/ssrn";
-import { unpaywallSource, resolveOaPdfUrl } from "./sources/unpaywall";
+import { unpaywallSource, unpaywallConfigured, resolveOaPdfUrl } from "./sources/unpaywall";
 import { resolveSciHubPdfUrl } from "./sources/sci_hub";
 import { zenodoSource } from "./sources/zenodo";
 import { acmSource } from "./sources/acm";
@@ -137,13 +146,48 @@ export interface DownloadOutcome {
   source: string;
   paperId: string;
   /** downloaded = new file; exists = sidecar-verified unchanged file;
-   * replaced = a differing (or unverifiable) file was overwritten. */
-  status: "downloaded" | "exists" | "replaced" | "failed";
+   * replaced = a differing (or unverifiable) file was overwritten;
+   * in-library = the OKF library already holds a Paper page for this DOI, so
+   * nothing was fetched (see `libraryPaper`). */
+  status: "downloaded" | "exists" | "replaced" | "in-library" | "failed";
   path?: string;
   bytes?: number;
   title?: string;
   doi?: string;
   error?: string;
+  /** Provenance identity of the saved file (downloaded / replaced only). */
+  identity?: DownloadIdentity;
+  /** in-library only: the covering Paper page, relative to the OKF library root. */
+  libraryPaper?: string;
+  /** Set when a candidate was refused because its bytes are already stored
+   * under a different DOI (the message names the stored file). */
+  identityConflict?: string;
+  /** Candidates dropped because they matched by title only and the
+   * allowTitleMatch setting is off. */
+  titleMatchSkipped?: number;
+  /** failed DOI acquisitions only: what each step of the chain answered. */
+  diagnosis?: AcquisitionDiagnosis;
+}
+
+/** One consulted step of the DOI acquisition chain. */
+export interface AcquisitionStage {
+  stage: "semantic-scholar" | "repositories" | "unpaywall" | "sci-hub" | "download";
+  /** candidate — produced a PDF link; none — answered and holds no open-access copy;
+   * unavailable — could not answer (HTTP error, timeout, rate limit) or its link could not be fetched;
+   * unconfigured — not queried because a required setting is missing; off — deliberately disabled. */
+  result: "candidate" | "none" | "unavailable" | "unconfigured" | "off";
+  detail?: string;
+}
+
+/** Why a DOI acquisition failed, in terms the user can act on. */
+export interface AcquisitionDiagnosis {
+  /** located-but-blocked — an open-access link existed but no PDF could be fetched from it;
+   * inconclusive — a step could not answer, so a paywall is not established;
+   * no-open-access-copy — every consulted step answered and none holds an open copy. */
+  verdict: "located-but-blocked" | "inconclusive" | "no-open-access-copy";
+  stages: AcquisitionStage[];
+  /** Concrete next steps (settings to fill in, manual download route). */
+  hints: string[];
 }
 
 /** Provenance identity of a saved PDF — how strongly the delivered bytes are
@@ -230,6 +274,58 @@ export interface DownloadOptions {
   timeoutMs?: number;
   /** Enable the unpaywall DOI fallback (needs contact email configured). */
   allowFallback?: boolean;
+  /** Normalized DOI → Paper page of the OKF library (see loadLibraryDoiIndex).
+   * A DOI found here is answered `in-library` without any network call.
+   * downloadAll / acquireByDoi load it once per batch when absent. */
+  libraryIndex?: ReadonlyMap<string, string>;
+}
+
+/** The `in-library` outcome when the library already covers `doi`, else undefined. */
+function inLibraryOutcome(
+  outcome: DownloadOutcome,
+  doi: string,
+  index: ReadonlyMap<string, string> | undefined,
+): DownloadOutcome | undefined {
+  const page = doi ? index?.get(normalizeDoi(doi)) : undefined;
+  if (page === undefined) return undefined;
+  outcome.status = "in-library";
+  outcome.libraryPaper = page;
+  return outcome;
+}
+
+/** Drop repeated links (several stages often offer the same PDF; a failing link would otherwise
+ * be retried once per stage) and, when the allowTitleMatch setting is off, title-only
+ * candidates; the title-only count lands on the outcome so a failure can say why. The first
+ * occurrence of a link keeps its place and identity. */
+function admitCandidates(
+  candidates: Array<{ url: string; identity: DownloadIdentity }>,
+  outcome: DownloadOutcome,
+): Array<{ url: string; identity: DownloadIdentity }> {
+  const seen = new Set<string>();
+  const distinct = candidates.filter((candidate) => !seen.has(candidate.url) && seen.add(candidate.url));
+  if (titleMatchAllowed()) return distinct;
+  const kept = distinct.filter((candidate) => candidate.identity !== "title-fallback");
+  if (kept.length < distinct.length) outcome.titleMatchSkipped = distinct.length - kept.length;
+  return kept;
+}
+
+/** Name the sources a failed fallback chain actually consulted: Sci-Hub is listed only when `useScihub` is enabled (the default). */
+function consultedSources(open: readonly string[]): string {
+  const names = sciHubEnabled() ? [...open, "Sci-Hub"] : [...open];
+  return names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}` : (names[0] ?? "");
+}
+
+/** Append the identity facts (byte conflict, skipped title-only hits) to a failure message. */
+function withIdentityNotes(message: string, outcome: DownloadOutcome): string {
+  const notes: string[] = [];
+  if (outcome.identityConflict) notes.push(outcome.identityConflict);
+  if (outcome.titleMatchSkipped) {
+    notes.push(
+      `${outcome.titleMatchSkipped} title-only candidate(s) skipped because the allowTitleMatch setting is off — `
+        + "a title hit can be a different paper; turn the setting back on to try them (okf_ingest flags a DOI mismatch afterwards)",
+    );
+  }
+  return notes.length > 0 ? `${message}; ${notes.join("; ")}` : message;
 }
 
 /** Resolve a download target for source+id, with the unpaywall fallback for
@@ -260,6 +356,21 @@ export interface RepositoryCandidate {
   identity: "doi-url" | "title-fallback";
 }
 
+/** PMC id of a repository hit that carries one (PMC adapter: numeric paperId; Europe PMC: the article url). */
+function pmcidOf(paper: Paper): string | undefined {
+  if (paper.source === "pmc" && /^\d+$/.test(paper.paperId)) return `PMC${paper.paperId}`;
+  const match = paper.source === "europepmc" ? /\/article\/PMC\/(\d+)/.exec(paper.url) : null;
+  return match ? `PMC${match[1]}` : undefined;
+}
+
+/** What one repository answered to one query (reported through collectRepositoryCandidates' onSource). */
+export interface RepositoryProbe {
+  source: string;
+  ok: boolean;
+  /** Failure description when !ok. */
+  detail?: string;
+}
+
 /** Query the open repositories and collect candidate PDF links, DOI matches
  * first. The DOI phase keeps only results whose DOI equals the requested one
  * (normalized, case-insensitive); when it yields at least one hit the title
@@ -270,7 +381,7 @@ export interface RepositoryCandidate {
 export async function collectRepositoryCandidates(
   sources: readonly SourceAdapter[],
   identifiers: { doi?: string; title?: string },
-  options: { signal?: AbortSignal; timeoutMs?: number } = {},
+  options: { signal?: AbortSignal; timeoutMs?: number; onSource?: (probe: RepositoryProbe) => void } = {},
 ): Promise<RepositoryCandidate[]> {
   const doi = bareDoi(identifiers.doi).toLowerCase();
   const title = identifiers.title?.trim();
@@ -279,6 +390,23 @@ export async function collectRepositoryCandidates(
   const out: RepositoryCandidate[] = [];
   const timeoutMs = Math.min(options.timeoutMs ?? REPOSITORY_SEARCH_TIMEOUT_MS, REPOSITORY_SEARCH_TIMEOUT_MS);
   const roomLeft = (): boolean => out.length < REPOSITORY_MAX_CANDIDATES;
+  /** Pool a link unless it is already pooled (Europe PMC and the PMC adapter often offer the same bucket PDF). */
+  const pool = (url: string, identity: RepositoryCandidate["identity"]): void => {
+    if (roomLeft() && !out.some((candidate) => candidate.url === url)) out.push({ url, identity });
+  };
+  /** The PMC Open Access bucket PDF of a DOI-verified PMC hit (failures are reported, never thrown). */
+  const bucketPdfUrl = async (paper: Paper): Promise<string | undefined> => {
+    const pmcid = pmcidOf(paper);
+    if (pmcid === undefined) return undefined;
+    try {
+      const url = await resolvePmcOpenDataPdfUrl(pmcid, { signal: options.signal, timeoutMs });
+      options.onSource?.({ source: "pmc-open-data", ok: true });
+      return url;
+    } catch (error) {
+      options.onSource?.({ source: "pmc-open-data", ok: false, detail: describeFailure(error) });
+      return undefined;
+    }
+  };
 
   if (doi) {
     for (const source of sources) {
@@ -286,8 +414,10 @@ export async function collectRepositoryCandidates(
       let papers: Paper[] = [];
       try {
         papers = await source.search({ query: doi, maxResults: 3, signal: options.signal, timeoutMs });
-      } catch {
+        options.onSource?.({ source: source.id, ok: true });
+      } catch (error) {
         // repository unavailable — try the next one
+        options.onSource?.({ source: source.id, ok: false, detail: describeFailure(error) });
         continue;
       }
       for (const paper of papers) {
@@ -295,9 +425,10 @@ export async function collectRepositoryCandidates(
         // A DOI-phase hit only counts when the result's own DOI matches the
         // request — anything else is exactly the misidentification this
         // reorder exists to prevent, so it is dropped rather than pooled.
-        if (paper.pdfUrl?.startsWith("http") && bareDoi(paper.doi).toLowerCase() === doi) {
-          out.push({ url: paper.pdfUrl, identity: "doi-url" });
-        }
+        if (bareDoi(paper.doi).toLowerCase() !== doi) continue;
+        const bucketUrl = await bucketPdfUrl(paper);
+        if (bucketUrl) pool(bucketUrl, "doi-url");
+        if (paper.pdfUrl?.startsWith("http")) pool(paper.pdfUrl, "doi-url");
       }
     }
   }
@@ -307,16 +438,20 @@ export async function collectRepositoryCandidates(
       if (!roomLeft()) break;
       try {
         const papers = await source.search({ query: title, maxResults: 3, signal: options.signal, timeoutMs });
+        options.onSource?.({ source: source.id, ok: true });
         for (const paper of papers) {
           if (!roomLeft()) break;
           if (!paper.pdfUrl?.startsWith("http")) continue;
           // A title-phase hit that nevertheless carries the requested DOI is
           // a verified match, not a fallback.
           const verified = Boolean(doi) && bareDoi(paper.doi).toLowerCase() === doi;
-          out.push({ url: paper.pdfUrl, identity: verified ? "doi-url" : "title-fallback" });
+          const bucketUrl = verified ? await bucketPdfUrl(paper) : undefined;
+          if (bucketUrl) pool(bucketUrl, "doi-url");
+          pool(paper.pdfUrl, verified ? "doi-url" : "title-fallback");
         }
-      } catch {
+      } catch (error) {
         // repository unavailable — try the next one
+        options.onSource?.({ source: source.id, ok: false, detail: describeFailure(error) });
       }
     }
   }
@@ -362,27 +497,38 @@ export async function fetchPdf(
   }
   await mkdir(dir, { recursive: true });
   const file = path.join(dir, `${safeFileFragment(baseName)}.pdf`);
-  // Unique tmp name: same dir keeps the rename on one filesystem (atomic),
-  // pid+uuid keeps concurrent writers off each other's inode.
-  const part = `${file}.${process.pid}-${randomUUID()}.part`;
-  try {
-    await writeFile(part, buffer);
-    await rename(part, file);
-  } catch (error) {
-    await rm(part, { force: true }).catch(() => {});
-    throw error;
-  }
-  await writeSidecar(file, {
-    sha256: sha256Hex(buffer),
-    bytes: buffer.byteLength,
-    doi: options.meta?.doi ?? "",
-    title: options.meta?.title ?? "",
-    source: options.meta?.source ?? "",
-    sourceUrl: options.meta?.sourceUrl ?? url,
-    retrievedAt: new Date().toISOString(),
-    identity: options.meta?.identity ?? "unknown",
+  const digest = sha256Hex(buffer);
+  // The conflict scan and the writes are one critical section: two concurrent
+  // downloads of identical bytes must not both pass the scan before either
+  // sidecar exists.
+  return withStoreLock(async () => {
+    const requestedDoi = options.meta?.doi ?? "";
+    if (requestedDoi) {
+      const conflict = await findSha256Conflict(sidecarScanDirs(dir), digest, requestedDoi, sidecarPathOf(file));
+      if (conflict) throw new IdentityConflictError(normalizeDoi(requestedDoi), conflict.doi, conflict.file);
+    }
+    // Unique tmp name: same dir keeps the rename on one filesystem (atomic),
+    // pid+uuid keeps concurrent writers off each other's inode.
+    const part = `${file}.${process.pid}-${randomUUID()}.part`;
+    try {
+      await writeFile(part, buffer);
+      await rename(part, file);
+    } catch (error) {
+      await rm(part, { force: true }).catch(() => {});
+      throw error;
+    }
+    await writeSidecar(file, {
+      sha256: digest,
+      bytes: buffer.byteLength,
+      doi: requestedDoi,
+      title: options.meta?.title ?? "",
+      source: options.meta?.source ?? "",
+      sourceUrl: options.meta?.sourceUrl ?? url,
+      retrievedAt: new Date().toISOString(),
+      identity: options.meta?.identity ?? "unknown",
+    });
+    return { path: file, bytes: buffer.byteLength };
   });
-  return { path: file, bytes: buffer.byteLength };
 }
 
 /** Download one paper by source + id. Idempotent — "exists" is only reported
@@ -412,6 +558,8 @@ export async function downloadPaper(
   const fragment = safeFileFragment(`${sourceId}-${paperId}`);
   const expected = path.join(options.dir, `${fragment}.pdf`);
   const doi = metadata.doi?.trim() || extractDoi(paperId);
+  const covered = inLibraryOutcome(outcome, doi, options.libraryIndex);
+  if (covered) return covered;
   let destinationTaken = false;
   try {
     const info = await stat(expected);
@@ -478,7 +626,7 @@ export async function downloadPaper(
     }
   }
 
-  for (const candidate of candidates) {
+  for (const candidate of admitCandidates(candidates, outcome)) {
     try {
       const saved = await fetchPdf(candidate.url, options.dir, fragment, {
         signal: options.signal,
@@ -494,17 +642,21 @@ export async function downloadPaper(
       outcome.status = destinationTaken ? "replaced" : "downloaded";
       outcome.path = saved.path;
       outcome.bytes = saved.bytes;
+      outcome.identity = candidate.identity;
       return outcome;
     } catch (error) {
       if (options.signal?.aborted) break;
-      // try the next candidate
-      void error;
+      // try the next candidate; a byte conflict is remembered for the failure message
+      if (error instanceof IdentityConflictError) outcome.identityConflict = error.message;
     }
   }
 
-  outcome.error = source.download || candidates.length > 0
-    ? "no usable PDF found after OA repositories, unpaywall and Sci-Hub (paper may be paywalled or absent from the mirrors)"
-    : `${sourceId} is metadata-only; no PDF download available`;
+  outcome.error = withIdentityNotes(
+    source.download || candidates.length > 0
+      ? `no usable PDF found after ${consultedSources(["OA repositories", "unpaywall"])} (paper may be paywalled${sciHubEnabled() ? " or absent from the mirrors" : "; Sci-Hub is off"})`
+      : `${sourceId} is metadata-only; no PDF download available`,
+    outcome,
+  );
   return outcome;
 }
 
@@ -539,13 +691,14 @@ export async function downloadAll(
 ): Promise<DownloadOutcome[]> {
   const concurrency = Math.max(1, Math.min(5, options.concurrency ?? 3));
   const results: DownloadOutcome[] = [];
+  const shared: DownloadOptions = { ...options, libraryIndex: options.libraryIndex ?? (await loadLibraryDoiIndex(options.dir)) };
   let cursor = 0;
   const worker = async (): Promise<void> => {
     while (cursor < tasks.length) {
       if (options.signal?.aborted) return;
       const task = tasks[cursor]!;
       cursor += 1;
-      const outcome = await downloadPaper(task.source, task.paperId, options, task);
+      const outcome = await downloadPaper(task.source, task.paperId, shared, task);
       results.push(outcome);
       options.onOutcome?.(outcome);
     }
@@ -559,15 +712,37 @@ export async function downloadAll(
   return results;
 }
 
+/** Short, actionable description of a failed request (status, timeout or message). */
+function describeFailure(error: unknown): string {
+  if (error instanceof HttpError) {
+    if (error.status === 429) return "HTTP 429 (rate-limited)";
+    if (error.status === 401 || error.status === 403) return `HTTP ${error.status} (access refused)`;
+    return `HTTP ${error.status}`;
+  }
+  const name = error instanceof Error ? error.name : "";
+  if (name === "TimeoutError" || name === "AbortError") return "timed out";
+  const message = error instanceof Error ? error.message : String(error);
+  return message.length > 120 ? `${message.slice(0, 117)}...` : message;
+}
+
+function hostOfUrl(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
 /** Semantic Scholar DOI-exact lookup for the acquisition chain: the card's
- * openAccessPdf link plus its title. A 404 (S2 does not know the DOI) and
- * any network failure both yield undefined — the repository / unpaywall /
- * Sci-Hub chain below still applies. The metadata call is capped at 30s
- * (JSON endpoint), never the generous PDF download timeout. */
+ * openAccessPdf link plus its title, and what the lookup answered. A 404
+ * (S2 does not know the DOI) counts as "none"; any other failure counts as
+ * "unavailable" — the repository / unpaywall / Sci-Hub chain below still
+ * applies. The metadata call is capped at 30s (JSON endpoint), never the
+ * generous PDF download timeout. */
 async function resolveSemanticScholarOaPdf(
   doi: string,
   options: { signal?: AbortSignal; timeoutMs?: number },
-): Promise<{ title: string; pdfUrl: string } | undefined> {
+): Promise<{ title: string; pdfUrl: string; stage: AcquisitionStage }> {
   const key = currentSourceKeys().semanticScholarApiKey;
   const headers: Record<string, string> = {};
   if (key) headers["x-api-key"] = key;
@@ -578,11 +753,112 @@ async function resolveSemanticScholarOaPdf(
       timeoutMs: Math.min(options.timeoutMs ?? 30_000, 30_000),
       headers,
     });
-    return { title: record.title?.trim() ?? "", pdfUrl: record.openAccessPdf?.url ?? "" };
+    const pdfUrl = record.openAccessPdf?.url ?? "";
+    return {
+      title: record.title?.trim() ?? "",
+      pdfUrl,
+      stage: pdfUrl
+        ? { stage: "semantic-scholar", result: "candidate" }
+        : { stage: "semantic-scholar", result: "none", detail: "Semantic Scholar lists no open-access PDF for this DOI" },
+    };
   } catch (error) {
     if (options.signal?.aborted) throw error;
-    return undefined;
+    if (error instanceof HttpError && error.status === 404) {
+      return { title: "", pdfUrl: "", stage: { stage: "semantic-scholar", result: "none", detail: "Semantic Scholar does not know this DOI" } };
+    }
+    return { title: "", pdfUrl: "", stage: { stage: "semantic-scholar", result: "unavailable", detail: describeFailure(error) } };
   }
+}
+
+/** The repositories step as one stage: a link found wins; otherwise any repository that
+ * failed to answer makes the step "unavailable" (its silence is not an absence). */
+function repositoriesStage(probes: readonly RepositoryProbe[], links: number): AcquisitionStage {
+  if (links > 0) return { stage: "repositories", result: "candidate", detail: `${links} link(s)` };
+  const failures = new Map<string, string>();
+  for (const probe of probes) if (!probe.ok && !failures.has(probe.source)) failures.set(probe.source, probe.detail ?? "failed");
+  if (failures.size === 0) return { stage: "repositories", result: "none", detail: "no open repository holds a PDF for this DOI" };
+  const asked = new Set(probes.map((probe) => probe.source)).size;
+  const named = [...failures].map(([source, detail]) => `${source}: ${detail}`).join("; ");
+  return { stage: "repositories", result: "unavailable", detail: `${failures.size} of ${asked} repositories did not answer (${named})` };
+}
+
+/** Unpaywall as one stage; the link is set only when it answered with an open-access PDF. */
+async function unpaywallStage(
+  doi: string,
+  options: { signal?: AbortSignal; timeoutMs?: number },
+): Promise<{ url?: string; stage: AcquisitionStage }> {
+  if (!unpaywallConfigured()) {
+    return { stage: { stage: "unpaywall", result: "unconfigured", detail: "no contact email configured (unpaywallEmail / contactEmail)" } };
+  }
+  try {
+    const url = await resolveOaPdfUrl(doi, { signal: options.signal, timeoutMs: options.timeoutMs });
+    return url
+      ? { url, stage: { stage: "unpaywall", result: "candidate" } }
+      : { stage: { stage: "unpaywall", result: "none", detail: "Unpaywall records no open-access PDF for this DOI" } };
+  } catch (error) {
+    if (options.signal?.aborted) throw error;
+    if (error instanceof HttpError && error.status === 404) {
+      return { stage: { stage: "unpaywall", result: "none", detail: "Unpaywall does not know this DOI" } };
+    }
+    return { stage: { stage: "unpaywall", result: "unavailable", detail: describeFailure(error) } };
+  }
+}
+
+const STAGE_LABEL: Record<AcquisitionStage["stage"], string> = {
+  "semantic-scholar": "Semantic Scholar",
+  repositories: "OA repositories",
+  unpaywall: "unpaywall",
+  "sci-hub": "Sci-Hub",
+  download: "download",
+};
+
+/** Verdict, next steps and the failure sentence for a DOI acquisition that produced no PDF. */
+function diagnoseAcquisition(
+  outcome: DownloadOutcome,
+  stages: AcquisitionStage[],
+  located: boolean,
+  dir: string,
+): { diagnosis: AcquisitionDiagnosis; message: string } {
+  const problems = stages.filter((stage) => stage.result === "unavailable" || stage.result === "unconfigured");
+  const keys = currentSourceKeys();
+  const hints: string[] = [];
+  for (const problem of problems) {
+    if (problem.stage === "semantic-scholar" && !keys.semanticScholarApiKey) {
+      hints.push("set SEMANTIC_SCHOLAR_API_KEY (a free key) to lift the shared rate limit of the Semantic Scholar API");
+    }
+    if (problem.stage === "unpaywall" && problem.result === "unconfigured") {
+      hints.push("set unpaywallEmail (any valid email) in the papersearch settings");
+    }
+    if (problem.stage === "repositories" && /\bcore: /.test(problem.detail ?? "") && !keys.coreApiKey) {
+      hints.push("set CORE_API_KEY (a free key) so the CORE repository accepts the request");
+    }
+  }
+  if (problems.some((problem) => problem.result === "unavailable" && problem.stage !== "download")) {
+    hints.push("transient failures are not cached — retry the failed DOIs later");
+  }
+  if (located) {
+    hints.push(`open the located link in a browser, save the PDF into ${dir} and okf_ingest it (or ask the user to supply the PDF)`);
+  }
+
+  const verdict: AcquisitionDiagnosis["verdict"] = located ? "located-but-blocked" : problems.length > 0 ? "inconclusive" : "no-open-access-copy";
+  const diagnosis: AcquisitionDiagnosis = { verdict, stages, hints: [...new Set(hints)] };
+  const answeredNone = stages.filter((stage) => stage.result === "none").map((stage) => STAGE_LABEL[stage.stage]);
+  const problemText = problems.map((problem) => `${STAGE_LABEL[problem.stage]}: ${problem.detail ?? problem.result}`).join("; ");
+
+  let message: string;
+  if (verdict === "located-but-blocked") {
+    const download = stages.find((stage) => stage.stage === "download");
+    message = `an open-access copy was located but could not be downloaded${download?.detail ? ` (${download.detail})` : ""}`;
+  } else if (verdict === "inconclusive") {
+    message = `no usable PDF found, but ${problemText} — this is not proof of a paywall`
+      + (answeredNone.length > 0 ? ` (${answeredNone.join(", ")} reported no open-access copy)` : "");
+  } else {
+    const consulted = stages.filter((stage) => stage.result === "none" || stage.result === "candidate").map((stage) => STAGE_LABEL[stage.stage]);
+    const names = consulted.length > 1 ? `${consulted.slice(0, -1).join(", ")} and ${consulted[consulted.length - 1]}` : (consulted[0] ?? "");
+    message = `no usable PDF found after ${names} (paper may be paywalled${sciHubEnabled() ? " or absent from the mirrors" : "; Sci-Hub is off"})`;
+  }
+  if (diagnosis.hints.length > 0) message += `; ${diagnosis.hints.join("; ")}`;
+  return { diagnosis, message: withIdentityNotes(message, outcome) };
 }
 
 /** Download one paper by bare DOI — the papersearch_acquire engine. The
@@ -613,6 +889,9 @@ export async function downloadByDoi(
     return outcome;
   }
 
+  const covered = inLibraryOutcome(outcome, doi, options.libraryIndex);
+  if (covered) return covered;
+
   const fragment = safeFileFragment(`doi-${doi}`);
   const expected = path.join(options.dir, `${fragment}.pdf`);
   let destinationTaken = false;
@@ -633,27 +912,28 @@ export async function downloadByDoi(
   }
 
   const candidates: Array<{ url: string; identity: DownloadIdentity }> = [];
+  const stages: AcquisitionStage[] = [];
   // Step 1 (requested S2 pass): DOI-exact card → openAccessPdf is DOI-anchored.
   const s2 = await resolveSemanticScholarOaPdf(doi, options);
-  const title = (metadata.title?.trim() || s2?.title || "").trim();
+  stages.push(s2.stage);
+  const title = (metadata.title?.trim() || s2.title || "").trim();
   if (title && !outcome.title) outcome.title = title;
-  if (s2?.pdfUrl.startsWith("http")) candidates.push({ url: s2.pdfUrl, identity: "doi-url" });
+  if (s2.pdfUrl.startsWith("http")) candidates.push({ url: s2.pdfUrl, identity: "doi-url" });
 
   if (options.allowFallback !== false) {
     // Step 2: open repositories (openaire/core/europepmc/pmc) by DOI, then
     // unpaywall — both DOI-anchored.
+    const probes: RepositoryProbe[] = [];
     const repositoryUrls = await collectRepositoryCandidates(
       repositoryAdapters(),
       { doi, title },
-      { signal: options.signal, timeoutMs: options.timeoutMs },
+      { signal: options.signal, timeoutMs: options.timeoutMs, onSource: (probe) => probes.push(probe) },
     );
     candidates.push(...repositoryUrls);
-    try {
-      const fallback = await resolveOaPdfUrl(doi, { signal: options.signal, timeoutMs: options.timeoutMs });
-      if (fallback) candidates.push({ url: fallback, identity: "doi-url" });
-    } catch {
-      // unpaywall unavailable — skip silently
-    }
+    stages.push(repositoriesStage(probes, repositoryUrls.length));
+    const unpaywall = await unpaywallStage(doi, options);
+    stages.push(unpaywall.stage);
+    if (unpaywall.url) candidates.push({ url: unpaywall.url, identity: "doi-url" });
     // Step 3: Sci-Hub last resort (mirror rotation + health store inside).
     if (sciHubEnabled()) {
       const resolved = await resolveSciHubPdfUrl(doi, {
@@ -661,10 +941,19 @@ export async function downloadByDoi(
         timeoutMs: options.timeoutMs,
       });
       if (resolved) candidates.push({ url: resolved.url, identity: "scihub" });
+      stages.push(resolved
+        ? { stage: "sci-hub", result: "candidate" }
+        : { stage: "sci-hub", result: "none", detail: "no Sci-Hub mirror served this paper" });
+    } else {
+      stages.push({ stage: "sci-hub", result: "off", detail: "useScihub is off" });
     }
+  } else {
+    stages.push({ stage: "repositories", result: "off", detail: "allowFallback is off" });
   }
 
-  for (const candidate of candidates) {
+  const admitted = admitCandidates(candidates, outcome);
+  const fetchFailures: string[] = [];
+  for (const candidate of admitted) {
     try {
       const saved = await fetchPdf(candidate.url, options.dir, fragment, {
         signal: options.signal,
@@ -680,15 +969,22 @@ export async function downloadByDoi(
       outcome.status = destinationTaken ? "replaced" : "downloaded";
       outcome.path = saved.path;
       outcome.bytes = saved.bytes;
+      outcome.identity = candidate.identity;
       return outcome;
     } catch (error) {
       if (options.signal?.aborted) break;
-      // try the next candidate
-      void error;
+      // try the next candidate; a byte conflict is remembered for the failure message
+      if (error instanceof IdentityConflictError) outcome.identityConflict = error.message;
+      else fetchFailures.push(`${hostOfUrl(candidate.url)}: ${describeFailure(error)}`);
     }
   }
+  if (admitted.length > 0) {
+    stages.push({ stage: "download", result: "unavailable", detail: fetchFailures.length > 0 ? fetchFailures.join("; ") : "no candidate could be saved" });
+  }
 
-  outcome.error = "no usable PDF found after Semantic Scholar, OA repositories, unpaywall and Sci-Hub (paper may be paywalled or absent from the mirrors)";
+  const failure = diagnoseAcquisition(outcome, stages, admitted.length > 0, options.dir);
+  outcome.diagnosis = failure.diagnosis;
+  outcome.error = failure.message;
   return outcome;
 }
 
@@ -704,13 +1000,14 @@ export async function acquireByDoi(
 ): Promise<DownloadOutcome[]> {
   const concurrency = Math.max(1, Math.min(5, options.concurrency ?? 3));
   const results: DownloadOutcome[] = [];
+  const shared: DownloadOptions = { ...options, libraryIndex: options.libraryIndex ?? (await loadLibraryDoiIndex(options.dir)) };
   let cursor = 0;
   const worker = async (): Promise<void> => {
     while (cursor < dois.length) {
       if (options.signal?.aborted) return;
       const doi = dois[cursor]!;
       cursor += 1;
-      const outcome = await downloadByDoi(doi, options);
+      const outcome = await downloadByDoi(doi, shared);
       results.push(outcome);
       options.onOutcome?.(outcome);
     }

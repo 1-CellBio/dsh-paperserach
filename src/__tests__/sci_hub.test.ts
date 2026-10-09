@@ -209,9 +209,13 @@ describe("sciHubEnabled", () => {
     expect(sciHubEnabled()).toBe(true);
   });
 
-  it("is disabled by a false env var", () => {
-    process.env.PAPERSEARCH_USE_SCI_HUB = "false";
-    expect(sciHubEnabled()).toBe(false);
+  it("is disabled by a false env var when no settings boolean is present", () => {
+    for (const off of ["false", "0", "off", "no"]) {
+      process.env.PAPERSEARCH_USE_SCI_HUB = off;
+      expect(sciHubEnabled()).toBe(false);
+    }
+    process.env.PAPERSEARCH_USE_SCI_HUB = "true";
+    expect(sciHubEnabled()).toBe(true);
   });
 
   it("is disabled by the settings boolean", async () => {
