@@ -2,6 +2,9 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { runAcquireJob } from "../jobs";
+import { LineLog } from "../log-buffer";
+import { __httpTestSeams } from "../http";
 import { acquireByDoi, downloadByDoi } from "../registry";
 import { resetSciHubHealth } from "../sources/sci_hub";
 import { refreshSourceKeys } from "../keys";
@@ -191,6 +194,207 @@ describe("downloadByDoi", () => {
     expect(first.status).toBe("downloaded");
     expect(second.status).toBe("exists");
     expect(second.path).toBe(first.path);
+  });
+});
+
+describe("downloadByDoi sciHub modes (two-round acquisition)", () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "dsh-papersearch-acquire-"));
+    resetSciHubHealth();
+  });
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    await refreshSourceKeys({});
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const sciHubServes = '<html><embed type="application/pdf" src="https://d1.sci-hub.se/paper.pdf"></html>';
+
+  it("off: open-access sources only — Sci-Hub is never contacted, even when it is on and would have served the paper", async () => {
+    await refreshSourceKeys({ unpaywallEmail: "t@example.org" });
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => {
+      const raw = String(url);
+      calls.push(raw);
+      if (raw.startsWith("https://api.semanticscholar.org/")) return httpError(404);
+      if (/^https:\/\/sci-hub\./.test(raw)) return htmlResponse(sciHubServes);
+      return tailAllMiss(raw) ?? fakePdfResponse();
+    }));
+
+    const outcome = await downloadByDoi("10.5678/paywalled", { dir, sciHub: "off" });
+    expect(outcome.status).toBe("failed");
+    expect(calls.some((call) => /sci-hub\./.test(call))).toBe(false);
+    expect(outcome.diagnosis?.stages.find((stage) => stage.stage === "sci-hub")?.result).toBe("off");
+    expect(outcome.error).toContain("Semantic Scholar, OA repositories and unpaywall");
+    expect(outcome.error).toContain("Sci-Hub was not consulted in this call (scihub=off)");
+    expect(outcome.error).not.toContain("absent from the mirrors");
+    expect(outcome.error).not.toContain("Sci-Hub is off");
+  });
+
+  it("off: an open-access hit still downloads", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => {
+      const raw = String(url);
+      if (raw.startsWith("https://api.semanticscholar.org/graph/v1/paper/DOI:")) {
+        return jsonResponse({ title: "A Paper", openAccessPdf: { url: "https://oa.example/paper.pdf" } });
+      }
+      return tailAllMiss(raw) ?? fakePdfResponse();
+    }));
+    const outcome = await downloadByDoi("10.1038/s41586-021-03819-2", { dir, sciHub: "off" });
+    expect(outcome.status).toBe("downloaded");
+    expect((await readSidecarFile(outcome.path!)).identity).toBe("doi-url");
+  });
+
+  it("only: Sci-Hub alone — Semantic Scholar, repositories and unpaywall are not contacted; the paper arrives with identity scihub", async () => {
+    await refreshSourceKeys({ unpaywallEmail: "t@example.org" });
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => {
+      const raw = String(url);
+      calls.push(raw);
+      if (/^https:\/\/sci-hub\./.test(raw)) return htmlResponse(sciHubServes);
+      return fakePdfResponse();
+    }));
+
+    const outcome = await downloadByDoi("10.5678/paywalled", { dir, sciHub: "only" });
+    expect(outcome.status).toBe("downloaded");
+    expect(calls.some((call) => /semanticscholar|openaire|core\.ac\.uk|ebi\.ac\.uk|eutils|unpaywall/.test(call))).toBe(false);
+    const sidecar = await readSidecarFile(outcome.path!);
+    expect(sidecar.identity).toBe("scihub");
+    expect(sidecar.sourceUrl).toBe("https://d1.sci-hub.se/paper.pdf");
+  });
+
+  it("only: a Sci-Hub miss fails naming Sci-Hub as the only source consulted, with the skipped stages marked off", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => tailAllMiss(String(url)) ?? fakePdfResponse()));
+
+    const outcome = await downloadByDoi("10.5678/nowhere", { dir, sciHub: "only" });
+    expect(outcome.status).toBe("failed");
+    expect(outcome.error).toContain("no usable PDF found after Sci-Hub (paper may be paywalled or absent from the mirrors)");
+    expect(outcome.diagnosis?.verdict).toBe("no-open-access-copy");
+    expect(outcome.diagnosis?.stages.map((stage) => `${stage.stage}:${stage.result}`)).toEqual([
+      "semantic-scholar:off",
+      "repositories:off",
+      "unpaywall:off",
+      "sci-hub:none",
+    ]);
+  });
+
+  it("only: mirrors that all refuse to answer make the step unavailable — inconclusive, not an absence — and point at scihubBaseUrl", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => (/^https:\/\/sci-hub\./.test(String(url)) ? httpError(403) : fakePdfResponse())));
+
+    const outcome = await downloadByDoi("10.5678/blocked", { dir, sciHub: "only" });
+    expect(outcome.status).toBe("failed");
+    const stage = outcome.diagnosis?.stages.find((entry) => entry.stage === "sci-hub");
+    expect(stage?.result).toBe("unavailable");
+    expect(stage?.detail).toBe(
+      "no Sci-Hub mirror answered (sci-hub.ee: HTTP 403; sci-hub.ru: HTTP 403; sci-hub.se: HTTP 403; sci-hub.vg: HTTP 403; sci-hub.al: HTTP 403; sci-hub.mk: HTTP 403)",
+    );
+    expect(outcome.diagnosis?.verdict).toBe("inconclusive");
+    expect(outcome.error).toContain("this is not proof of a paywall");
+    expect(outcome.error).not.toContain("absent from the mirrors");
+    expect(outcome.diagnosis?.hints.some((hint) => hint.includes("scihubBaseUrl"))).toBe(true);
+  });
+
+  it("only: one mirror answering \"article not found\" makes the step none, while naming the mirrors that were silent", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => {
+      const raw = String(url);
+      if (raw.startsWith("https://sci-hub.ee/")) return httpError(403);
+      return tailAllMiss(raw) ?? fakePdfResponse();
+    }));
+
+    const outcome = await downloadByDoi("10.5678/absent", { dir, sciHub: "only" });
+    const stage = outcome.diagnosis?.stages.find((entry) => entry.stage === "sci-hub");
+    expect(stage?.result).toBe("none");
+    expect(stage?.detail).toBe('5 of 6 mirrors answered "article not found"; 1 did not answer (sci-hub.ee: HTTP 403)');
+    expect(outcome.diagnosis?.verdict).toBe("no-open-access-copy");
+  });
+
+  it("auto (the default) keeps the full chain: Semantic Scholar → repositories → unpaywall → Sci-Hub", async () => {
+    await refreshSourceKeys({ unpaywallEmail: "t@example.org" });
+    vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => {
+      const raw = String(url);
+      if (raw.startsWith("https://api.semanticscholar.org/")) return httpError(404);
+      return tailAllMiss(raw) ?? fakePdfResponse();
+    }));
+    const outcome = await downloadByDoi("10.5678/nowhere", { dir, sciHub: "auto" });
+    expect(outcome.diagnosis?.stages.map((stage) => stage.stage)).toEqual(["semantic-scholar", "repositories", "unpaywall", "sci-hub"]);
+    expect(outcome.diagnosis?.stages.map((stage) => stage.result)).not.toContain("off");
+  });
+});
+
+describe("downloadByDoi Semantic Scholar pacing", () => {
+  let dir: string;
+  const sleeps: number[] = [];
+  const productionSleep = __httpTestSeams.sleep;
+  const productionNow = __httpTestSeams.now;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "dsh-papersearch-acquire-"));
+    resetSciHubHealth();
+    sleeps.length = 0;
+    __httpTestSeams.sleep = async (ms: number) => {
+      sleeps.push(ms);
+    };
+    __httpTestSeams.now = () => 9_000_000_000_000; // frozen clock: slots are deterministic
+    __httpTestSeams.resetPacing();
+  });
+  afterEach(async () => {
+    __httpTestSeams.sleep = productionSleep;
+    __httpTestSeams.now = productionNow;
+    __httpTestSeams.resetPacing();
+    vi.unstubAllGlobals();
+    delete process.env.SEMANTIC_SCHOLAR_API_KEY;
+    await refreshSourceKeys({});
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const lookupThreeDois = async (): Promise<void> => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => {
+      const raw = String(url);
+      if (raw.startsWith("https://api.semanticscholar.org/")) return httpError(404);
+      return tailAllMiss(raw) ?? fakePdfResponse();
+    }));
+    await Promise.all(["10.5678/a", "10.5678/b", "10.5678/c"].map((doi) => downloadByDoi(doi, { dir, sciHub: "off" })));
+  };
+
+  it("spreads concurrent DOI lookups 400 ms apart without an API key", async () => {
+    await lookupThreeDois();
+    expect(sleeps).toEqual([400, 800]);
+  });
+
+  it("spreads them 1100 ms apart with an API key (the free key allows one request per second)", async () => {
+    process.env.SEMANTIC_SCHOLAR_API_KEY = "test-key";
+    await refreshSourceKeys({});
+    await lookupThreeDois();
+    expect(sleeps).toEqual([1_100, 2_200]);
+  });
+});
+
+describe("runAcquireJob chain line", () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "dsh-papersearch-acquire-"));
+    resetSciHubHealth();
+  });
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    await refreshSourceKeys({});
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("states the chain the run consults for each sciHub mode", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => {
+      const raw = String(url);
+      if (raw.startsWith("https://api.semanticscholar.org/")) return httpError(404);
+      return tailAllMiss(raw) ?? fakePdfResponse();
+    }));
+    const lineFor = async (sciHub: "auto" | "off" | "only"): Promise<string> => {
+      const log = new LineLog();
+      await runAcquireJob({ dois: ["10.5678/nowhere"], dir, downloadTimeoutMs: 5_000, sciHub }, async () => {}, log, new AbortController().signal);
+      return log.snapshot().split("\n")[0] ?? "";
+    };
+    expect(await lineFor("auto")).toContain("(chain: semantic-scholar → oa-repositories/unpaywall → sci-hub)");
+    expect(await lineFor("off")).toContain("(chain: semantic-scholar → oa-repositories/unpaywall; sci-hub skipped (scihub=off))");
+    expect(await lineFor("only")).toContain("(chain: sci-hub only (scihub=only))");
   });
 });
 

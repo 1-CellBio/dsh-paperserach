@@ -4,7 +4,7 @@ import type { GenericCallView, ToolRunContext } from "@deepseek-ai/dsh-tools";
 import type { JsonValue } from "@deepseek-ai/dsh-util-values";
 import { papersearchHelp } from "./help";
 import { IdentityConflictError } from "./identity";
-import { downloadPaper, fetchPdf, searchSources, SOURCE_IDS, activeSourceIds } from "./registry";
+import { downloadPaper, fetchPdf, searchSources, SOURCE_IDS, activeSourceIds, type SciHubMode } from "./registry";
 import { safeFileFragment } from "./sources/adapter";
 import { resolveSciHubPdfUrl, sciHubMirrors } from "./sources/sci_hub";
 import { confineDirToBase, resolvePdfDir } from "./paths";
@@ -52,6 +52,19 @@ function parseSources(raw: string | undefined): string[] | undefined {
     .map((item) => item.trim().toLowerCase())
     .filter(Boolean);
   return cleaned.length > 0 ? cleaned : undefined;
+}
+
+const SCIHUB_MODES: readonly SciHubMode[] = ["auto", "off", "only"];
+
+/** The `scihub` argument of papersearch_acquire; an absent value is `auto`, anything else outside the three modes is rejected. */
+function parseSciHubMode(raw: unknown): SciHubMode {
+  if (raw === undefined || raw === null || raw === "") return "auto";
+  const value = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  const mode = SCIHUB_MODES.find((candidate) => candidate === value);
+  if (mode === undefined) {
+    throw new Error(`papersearch_acquire: scihub must be one of ${SCIHUB_MODES.join(", ")} (got ${JSON.stringify(raw)})`);
+  }
+  return mode;
 }
 
 /** nextStep tails: what to do once the library holds the papers. */
@@ -355,10 +368,15 @@ export function registerTools(ctx: Context, getConfig: ConfigSource): void {
   ctx.tools.register(defineTool({
     name: "papersearch_acquire",
     description:
-      "Batch-acquire full-text PDFs by DOI into the OKF sources dir (OKF/sources/pdfs). Each DOI is resolved through a DOI-anchored chain: Semantic Scholar's openAccessPdf first, then open repositories (openaire/core/europepmc/pmc) + the unpaywall OA resolver, then Sci-Hub as the last resort (on by default; skipped when the installation turns useScihub off — the job log states whether it was consulted). THE full-text acquisition step after csw_research / csw_deep_research / papersearch_search hands you DOIs — acquiring full text BEFORE writing is what lets okf_ingest extract citable claims (abstract-only records starve the evidence gates). Long-running: defaults to a background job that returns a job id, with per-DOI progress in the job output and the staged file names + unresolvable DOIs in the completion detail. A DOI that yields no PDF carries a diagnosis (located-but-blocked / inconclusive / no-open-access-copy, plus what each step answered): only no-open-access-copy means a paywall — relay inconclusive and located-but-blocked results to the user as they are, with the settings or manual download they name. You are notified in-session when it finishes — do NOT poll in a loop; when genuinely blocked, call job_output once with wait=true and timeout_ms=600000 (the maximum). background=false runs synchronously and returns the per-DOI manifest. DOIs the OKF library already covers are answered status 'in-library' (libraryPaper = papers/…) without any download — use that paper through okf_search / okf_get instead of re-acquiring it. A payload whose bytes are already stored under a different DOI is refused (identityConflict) — one of the two DOIs is not this document. The staged PDFs are handed to okf for automatic ingest when the run ends (sync: the result's `ingest` field; background: the completion detail names the ingest job) — do NOT call okf_ingest on them again; call it yourself only when ingest did not start. Then okf_search / csw writing.",
+      "Batch-acquire full-text PDFs by DOI into the OKF sources dir (OKF/sources/pdfs). Each DOI is resolved through a DOI-anchored chain: Semantic Scholar's openAccessPdf first, then open repositories (openaire/core/europepmc/pmc) + the unpaywall OA resolver, then Sci-Hub as the last resort (on by default; skipped when the installation turns useScihub off — the job log states whether it was consulted). For a two-round acquisition call it twice: scihub=\"off\" over every DOI (open-access sources only), then scihub=\"only\" over the DOIs the first round reported as failed. THE full-text acquisition step after csw_research / csw_deep_research / papersearch_search hands you DOIs — acquiring full text BEFORE writing is what lets okf_ingest extract citable claims (abstract-only records starve the evidence gates). Long-running: defaults to a background job that returns a job id, with per-DOI progress in the job output and the staged file names + unresolvable DOIs in the completion detail. A DOI that yields no PDF carries a diagnosis (located-but-blocked / inconclusive / no-open-access-copy, plus what each step answered): only no-open-access-copy means a paywall — relay inconclusive and located-but-blocked results to the user as they are, with the settings or manual download they name. You are notified in-session when it finishes — do NOT poll in a loop; when genuinely blocked, call job_output once with wait=true and timeout_ms=600000 (the maximum). background=false runs synchronously and returns the per-DOI manifest. DOIs the OKF library already covers are answered status 'in-library' (libraryPaper = papers/…) without any download — use that paper through okf_search / okf_get instead of re-acquiring it. A payload whose bytes are already stored under a different DOI is refused (identityConflict) — one of the two DOIs is not this document. The staged PDFs are handed to okf for automatic ingest when the run ends (sync: the result's `ingest` field; background: the completion detail names the ingest job) — do NOT call okf_ingest on them again; call it yourself only when ingest did not start. Then okf_search / csw writing.",
     parameters: {
       dois: { type: "array", items: { type: "string" }, required: true, description: `DOIs to acquire (bare or https://doi.org/… form; deduplicated, max ${MAX_ACQUIRE_COUNT} per call)` },
       dir: { type: "string", description: "Optional save dir, confined to the OKF sources dir: relative paths resolve against it; absolute paths and .. escapes are rejected (move the root via the pdfDir setting)." },
+      scihub: {
+        type: "string",
+        description:
+          "Sci-Hub use for this call: 'auto' (default) = last stage of the chain when useScihub is on; 'off' = open-access sources only (round 1 of a two-round acquisition); 'only' = Sci-Hub alone, Semantic Scholar / repositories / unpaywall are not consulted (round 2: pass only the DOIs round 1 reported as failed; rejected when useScihub is off).",
+      },
       background: {
         type: "boolean",
         description:
@@ -368,6 +386,13 @@ export function registerTools(ctx: Context, getConfig: ConfigSource): void {
     output: jsonOutput,
     isConcurrencySafe: () => false,
     async execute(args, exec) {
+      const sciHub = parseSciHubMode(args.scihub);
+      if (sciHub === "only") {
+        await refreshKeys();
+        if (!sciHubEnabled()) {
+          throw new Error("papersearch_acquire: scihub=only needs the useScihub setting on, and it is off on this installation");
+        }
+      }
       const raw = Array.isArray(args.dois) ? args.dois : [];
       const seen = new Set<string>();
       const dois: string[] = [];
@@ -388,6 +413,7 @@ export function registerTools(ctx: Context, getConfig: ConfigSource): void {
         dois,
         dir,
         downloadTimeoutMs: downloadTimeout(),
+        sciHub,
       };
       return asJson(await maybeBackground(
         ctx,

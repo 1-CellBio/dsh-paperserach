@@ -64,6 +64,7 @@ const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
 export const __httpTestSeams = {
   sleep: (ms: number, signal?: AbortSignal): Promise<void> => sleep(ms, signal),
   now: (): number => Date.now(),
+  resetPacing: (): void => nextSlotByHost.clear(),
 };
 
 function retryDelayMs(attempt: number, retryAfter: string | null, isRateLimit: boolean): number {
@@ -78,6 +79,23 @@ function retryDelayMs(attempt: number, retryAfter: string | null, isRateLimit: b
     return Math.min(20_000, 2_000 * 4 ** attempt);
   }
   return Math.min(15_000, (attempt + 1) * 1_500);
+}
+
+const nextSlotByHost = new Map<string, number>();
+
+/** Spaces request starts to one host at least `minIntervalMs` apart across all
+ * concurrent callers in this process: each call reserves the next free slot
+ * synchronously, then sleeps until it. Batch lookups that fan out (acquire
+ * runs three DOIs at once) otherwise burst into a keyless rate limit.
+ * @param url Any URL on the host to pace.
+ * @param minIntervalMs Minimum gap between two request starts.
+ * @param signal Abort signal; an abort rejects the wait. */
+export async function paceRequests(url: string, minIntervalMs: number, signal?: AbortSignal): Promise<void> {
+  const host = hostOf(url);
+  const now = __httpTestSeams.now();
+  const slot = Math.max(now, nextSlotByHost.get(host) ?? 0);
+  nextSlotByHost.set(host, slot + minIntervalMs);
+  if (slot > now) await __httpTestSeams.sleep(slot - now, signal);
 }
 
 /** Shared request primitive: native fetch plus the retry ladder, host 429

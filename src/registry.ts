@@ -1,7 +1,7 @@
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
-import { fetchWithRetry, getJson, HttpError, USER_AGENT } from "./http";
+import { fetchWithRetry, getJson, HttpError, paceRequests, USER_AGENT } from "./http";
 import {
   findSha256Conflict,
   IdentityConflictError,
@@ -32,7 +32,7 @@ import { pubmedSource } from "./sources/pubmed";
 import { semanticSource } from "./sources/semantic";
 import { ssrnSource } from "./sources/ssrn";
 import { unpaywallSource, unpaywallConfigured, resolveOaPdfUrl } from "./sources/unpaywall";
-import { resolveSciHubPdfUrl } from "./sources/sci_hub";
+import { resolveSciHubPdfUrl, type SciHubProbe } from "./sources/sci_hub";
 import { zenodoSource } from "./sources/zenodo";
 import { acmSource } from "./sources/acm";
 import { ieeeSource } from "./sources/ieee";
@@ -268,12 +268,24 @@ async function sha256OfFile(pdfPath: string): Promise<string> {
   return sha256Hex(await readFile(pdfPath));
 }
 
+/** How one DOI acquisition call uses Sci-Hub: `auto` — last stage of the chain when `useScihub` is on;
+ *  `off` — open-access stages only (round 1 of a two-round acquisition); `only` — Sci-Hub alone,
+ *  Semantic Scholar / repositories / unpaywall are not consulted (round 2 for the DOIs round 1 missed). */
+export type SciHubMode = "auto" | "off" | "only";
+
+/** Stage detail recorded when `scihub=off` skips Sci-Hub; diagnoseAcquisition tells it apart from the `useScihub` setting being off. */
+const SCIHUB_SKIPPED_DETAIL = "scihub=off: this call uses open-access sources only";
+/** Stage detail recorded for the open-access stages that `scihub=only` does not consult. */
+const OPEN_ACCESS_SKIPPED_DETAIL = "scihub=only: this call consults Sci-Hub alone";
+
 export interface DownloadOptions {
   dir: string;
   signal?: AbortSignal;
   timeoutMs?: number;
   /** Enable the unpaywall DOI fallback (needs contact email configured). */
   allowFallback?: boolean;
+  /** Sci-Hub use for downloadByDoi / acquireByDoi (default `auto`). `only` needs `useScihub` on: the caller rejects it otherwise. */
+  sciHub?: SciHubMode;
   /** Normalized DOI → Paper page of the OKF library (see loadLibraryDoiIndex).
    * A DOI found here is answered `in-library` without any network call.
    * downloadAll / acquireByDoi load it once per batch when absent. */
@@ -733,6 +745,13 @@ function hostOfUrl(url: string): string {
   }
 }
 
+/** Minimum gap between Semantic Scholar DOI lookups. A free API key is limited
+ * to one request per second; without a key the shared pool answers 429 under
+ * bursts, so lookups are spread out (a 0.3 s interval is reported to work for
+ * serial batches of hundreds of DOIs). */
+const S2_KEYED_INTERVAL_MS = 1_100;
+const S2_KEYLESS_INTERVAL_MS = 400;
+
 /** Semantic Scholar DOI-exact lookup for the acquisition chain: the card's
  * openAccessPdf link plus its title, and what the lookup answered. A 404
  * (S2 does not know the DOI) counts as "none"; any other failure counts as
@@ -748,6 +767,7 @@ async function resolveSemanticScholarOaPdf(
   if (key) headers["x-api-key"] = key;
   const url = `https://api.semanticscholar.org/graph/v1/paper/DOI:${encodeURIComponent(doi)}?fields=title,openAccessPdf`;
   try {
+    await paceRequests(url, key ? S2_KEYED_INTERVAL_MS : S2_KEYLESS_INTERVAL_MS, options.signal);
     const record = await getJson<{ title?: string; openAccessPdf?: { url?: string } | null }>(url, {
       signal: options.signal,
       timeoutMs: Math.min(options.timeoutMs ?? 30_000, 30_000),
@@ -780,6 +800,25 @@ function repositoriesStage(probes: readonly RepositoryProbe[], links: number): A
   const asked = new Set(probes.map((probe) => probe.source)).size;
   const named = [...failures].map(([source, detail]) => `${source}: ${detail}`).join("; ");
   return { stage: "repositories", result: "unavailable", detail: `${failures.size} of ${asked} repositories did not answer (${named})` };
+}
+
+/** The Sci-Hub step as one stage when no mirror produced a link. A mirror that
+ * answered "article not found" makes the step "none"; when every mirror was
+ * silent (network error, HTTP error, challenge page) the step is "unavailable"
+ * — that is not evidence the paper is absent. */
+function sciHubMissStage(probes: readonly SciHubProbe[]): AcquisitionStage {
+  const notFound = probes.filter((probe) => probe.outcome === "not-found");
+  const silent = probes.filter((probe) => probe.outcome === "unavailable");
+  const named = silent.map((probe) => `${hostOfUrl(probe.mirror)}: ${probe.detail ?? "no answer"}`).join("; ");
+  if (notFound.length > 0) {
+    return {
+      stage: "sci-hub",
+      result: "none",
+      detail: `${notFound.length} of ${probes.length} mirrors answered "article not found"` + (silent.length > 0 ? `; ${silent.length} did not answer (${named})` : ""),
+    };
+  }
+  if (silent.length === 0) return { stage: "sci-hub", result: "none", detail: "no Sci-Hub mirror served this paper" };
+  return { stage: "sci-hub", result: "unavailable", detail: `no Sci-Hub mirror answered (${named})` };
 }
 
 /** Unpaywall as one stage; the link is set only when it answered with an open-access PDF. */
@@ -832,6 +871,9 @@ function diagnoseAcquisition(
     if (problem.stage === "repositories" && /\bcore: /.test(problem.detail ?? "") && !keys.coreApiKey) {
       hints.push("set CORE_API_KEY (a free key) so the CORE repository accepts the request");
     }
+    if (problem.stage === "sci-hub" && problem.result === "unavailable") {
+      hints.push("set scihubBaseUrl (comma-separated) to Sci-Hub mirrors that answer from this network");
+    }
   }
   if (problems.some((problem) => problem.result === "unavailable" && problem.stage !== "download")) {
     hints.push("transient failures are not cached — retry the failed DOIs later");
@@ -855,7 +897,13 @@ function diagnoseAcquisition(
   } else {
     const consulted = stages.filter((stage) => stage.result === "none" || stage.result === "candidate").map((stage) => STAGE_LABEL[stage.stage]);
     const names = consulted.length > 1 ? `${consulted.slice(0, -1).join(", ")} and ${consulted[consulted.length - 1]}` : (consulted[0] ?? "");
-    message = `no usable PDF found after ${names} (paper may be paywalled${sciHubEnabled() ? " or absent from the mirrors" : "; Sci-Hub is off"})`;
+    const sciHubStage = stages.find((stage) => stage.stage === "sci-hub");
+    const sciHubNote = sciHubStage === undefined
+      ? (sciHubEnabled() ? " or absent from the mirrors" : "; Sci-Hub is off")
+      : sciHubStage.result !== "off"
+        ? " or absent from the mirrors"
+        : sciHubStage.detail === SCIHUB_SKIPPED_DETAIL ? "; Sci-Hub was not consulted in this call (scihub=off)" : "; Sci-Hub is off";
+    message = `no usable PDF found after ${names} (paper may be paywalled${sciHubNote})`;
   }
   if (diagnosis.hints.length > 0) message += `; ${diagnosis.hints.join("; ")}`;
   return { diagnosis, message: withIdentityNotes(message, outcome) };
@@ -911,39 +959,51 @@ export async function downloadByDoi(
     // not present — proceed
   }
 
+  const sciHubMode = options.sciHub ?? "auto";
   const candidates: Array<{ url: string; identity: DownloadIdentity }> = [];
   const stages: AcquisitionStage[] = [];
-  // Step 1 (requested S2 pass): DOI-exact card → openAccessPdf is DOI-anchored.
-  const s2 = await resolveSemanticScholarOaPdf(doi, options);
-  stages.push(s2.stage);
-  const title = (metadata.title?.trim() || s2.title || "").trim();
-  if (title && !outcome.title) outcome.title = title;
-  if (s2.pdfUrl.startsWith("http")) candidates.push({ url: s2.pdfUrl, identity: "doi-url" });
+  let title = (metadata.title ?? "").trim();
+  if (sciHubMode === "only") {
+    for (const stage of ["semantic-scholar", "repositories", "unpaywall"] as const) {
+      stages.push({ stage, result: "off", detail: OPEN_ACCESS_SKIPPED_DETAIL });
+    }
+  } else {
+    // Step 1 (requested S2 pass): DOI-exact card → openAccessPdf is DOI-anchored.
+    const s2 = await resolveSemanticScholarOaPdf(doi, options);
+    stages.push(s2.stage);
+    title = (metadata.title?.trim() || s2.title || "").trim();
+    if (title && !outcome.title) outcome.title = title;
+    if (s2.pdfUrl.startsWith("http")) candidates.push({ url: s2.pdfUrl, identity: "doi-url" });
+  }
 
   if (options.allowFallback !== false) {
-    // Step 2: open repositories (openaire/core/europepmc/pmc) by DOI, then
-    // unpaywall — both DOI-anchored.
-    const probes: RepositoryProbe[] = [];
-    const repositoryUrls = await collectRepositoryCandidates(
-      repositoryAdapters(),
-      { doi, title },
-      { signal: options.signal, timeoutMs: options.timeoutMs, onSource: (probe) => probes.push(probe) },
-    );
-    candidates.push(...repositoryUrls);
-    stages.push(repositoriesStage(probes, repositoryUrls.length));
-    const unpaywall = await unpaywallStage(doi, options);
-    stages.push(unpaywall.stage);
-    if (unpaywall.url) candidates.push({ url: unpaywall.url, identity: "doi-url" });
+    if (sciHubMode !== "only") {
+      // Step 2: open repositories (openaire/core/europepmc/pmc) by DOI, then
+      // unpaywall — both DOI-anchored.
+      const probes: RepositoryProbe[] = [];
+      const repositoryUrls = await collectRepositoryCandidates(
+        repositoryAdapters(),
+        { doi, title },
+        { signal: options.signal, timeoutMs: options.timeoutMs, onSource: (probe) => probes.push(probe) },
+      );
+      candidates.push(...repositoryUrls);
+      stages.push(repositoriesStage(probes, repositoryUrls.length));
+      const unpaywall = await unpaywallStage(doi, options);
+      stages.push(unpaywall.stage);
+      if (unpaywall.url) candidates.push({ url: unpaywall.url, identity: "doi-url" });
+    }
     // Step 3: Sci-Hub last resort (mirror rotation + health store inside).
-    if (sciHubEnabled()) {
+    if (sciHubMode === "off") {
+      stages.push({ stage: "sci-hub", result: "off", detail: SCIHUB_SKIPPED_DETAIL });
+    } else if (sciHubEnabled()) {
+      const sciHubProbes: SciHubProbe[] = [];
       const resolved = await resolveSciHubPdfUrl(doi, {
         signal: options.signal,
         timeoutMs: options.timeoutMs,
+        onProbe: (probe) => sciHubProbes.push(probe),
       });
       if (resolved) candidates.push({ url: resolved.url, identity: "scihub" });
-      stages.push(resolved
-        ? { stage: "sci-hub", result: "candidate" }
-        : { stage: "sci-hub", result: "none", detail: "no Sci-Hub mirror served this paper" });
+      stages.push(resolved ? { stage: "sci-hub", result: "candidate" } : sciHubMissStage(sciHubProbes));
     } else {
       stages.push({ stage: "sci-hub", result: "off", detail: "useScihub is off" });
     }

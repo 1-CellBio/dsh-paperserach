@@ -7,10 +7,12 @@ import {
   resolveSciHubPdfUrl,
   sciHubBaseUrl,
   sciHubMirrors,
+  type SciHubProbe,
 } from "../sources/sci_hub";
 import { sciHubEnabled, refreshSourceKeys } from "../keys";
+import { __httpTestSeams } from "../http";
 
-const BASE = "https://sci-hub.vg";
+const BASE = "https://sci-hub.ee";
 const PDF = "https://d1.sci-hub.se/10.1038/nature12373.pdf";
 
 function htmlResponse(body: string) {
@@ -38,13 +40,20 @@ afterEach(async () => {
 });
 
 describe("sciHubMirrors / sciHubBaseUrl", () => {
-  it("defaults to the curated mirror list", () => {
+  it("defaults to the curated mirror list, .ee/.ru/.se first", () => {
     expect(sciHubMirrors()).toEqual([...DEFAULT_SCIHUB_MIRRORS]);
-    expect(sciHubMirrors()[0]).toBe("https://sci-hub.vg");
+    expect([...DEFAULT_SCIHUB_MIRRORS]).toEqual([
+      "https://sci-hub.ee",
+      "https://sci-hub.ru",
+      "https://sci-hub.se",
+      "https://sci-hub.vg",
+      "https://sci-hub.al",
+      "https://sci-hub.mk",
+    ]);
   });
 
   it("sciHubBaseUrl returns the primary mirror", () => {
-    expect(sciHubBaseUrl()).toBe("https://sci-hub.vg");
+    expect(sciHubBaseUrl()).toBe("https://sci-hub.ee");
   });
 
   it("a single setting wins and drives rotation", async () => {
@@ -160,7 +169,7 @@ describe("resolveSciHubPdfUrl", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const result = await resolveSciHubPdfUrl("10.1038/nature12373", {});
-    expect(result).toEqual({ url: PDF, mirror: "https://sci-hub.vg" });
+    expect(result).toEqual({ url: PDF, mirror: BASE });
     expect(String(fetchMock.mock.calls[0]![0])).toBe(`${BASE}/10.1038/nature12373`);
     expect(String(fetchMock.mock.calls[0]![1].headers["User-Agent"])).toContain("Chrome");
   });
@@ -178,29 +187,76 @@ describe("resolveSciHubPdfUrl", () => {
       return htmlResponse(url.startsWith(`${BASE}/`) ? notFoundPage : embedPage);
     }));
     const result = await resolveSciHubPdfUrl("10.1038/nature12373", {});
-    expect(result?.mirror).toBe("https://sci-hub.al");
-    expect(calls[0]).toBe(`${BASE}/10.1038/nature12373`);      // sci-hub.vg first
-    expect(calls[1]).toBe("https://sci-hub.al/10.1038/nature12373");
+    expect(result?.mirror).toBe("https://sci-hub.ru");
+    expect(calls[0]).toBe(`${BASE}/10.1038/nature12373`);      // sci-hub.ee first
+    expect(calls[1]).toBe("https://sci-hub.ru/10.1038/nature12373");
   });
 
   it("de-prioritizes a mirror that just failed (health store)", async () => {
-    // First resolution: vg fails, al succeeds → only vg is recorded as down.
+    // First resolution: ee fails, ru succeeds → only ee is recorded as down.
     vi.stubGlobal("fetch", vi.fn(async (url: string) =>
       htmlResponse(String(url).startsWith(`${BASE}/`) ? notFoundPage : embedPage),
     ));
     const first = await resolveSciHubPdfUrl("10.1/one", {});
-    expect(first?.mirror).toBe("https://sci-hub.al");
+    expect(first?.mirror).toBe("https://sci-hub.ru");
     vi.unstubAllGlobals();
 
-    // Second resolution: vg must NOT be tried first anymore.
+    // Second resolution: ee must NOT be tried first anymore.
     const calls: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (url: string) => {
       calls.push(String(url));
-      return htmlResponse(url.includes("sci-hub.al") ? embedPage : notFoundPage);
+      return htmlResponse(url.includes("sci-hub.ru") ? embedPage : notFoundPage);
     }));
     const result = await resolveSciHubPdfUrl("10.1/two", {});
-    expect(result?.mirror).toBe("https://sci-hub.al");
-    expect(calls[0]).toBe("https://sci-hub.al/10.1/two"); // vg skipped
+    expect(result?.mirror).toBe("https://sci-hub.ru");
+    expect(calls[0]).toBe("https://sci-hub.ru/10.1/two"); // ee skipped
+  });
+
+  it("reports what each mirror answered: HTTP error, unrecognized page, not-found, then the hit", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const mirror = new URL(String(url)).host;
+      if (mirror === "sci-hub.ee") return { ok: false, status: 403, headers: { get: () => null } };
+      if (mirror === "sci-hub.ru") return htmlResponse("<html>Checking your browser before accessing</html>");
+      if (mirror === "sci-hub.se") return htmlResponse(notFoundPage);
+      return htmlResponse(embedPage);
+    }));
+    const probes: SciHubProbe[] = [];
+    const result = await resolveSciHubPdfUrl("10.1/probe", { onProbe: (probe) => probes.push(probe) });
+    expect(result?.mirror).toBe("https://sci-hub.vg");
+    expect(probes).toEqual([
+      { mirror: "https://sci-hub.ee", outcome: "unavailable", detail: "HTTP 403" },
+      { mirror: "https://sci-hub.ru", outcome: "unavailable", detail: "page has neither a PDF link nor a not-found marker" },
+      { mirror: "https://sci-hub.se", outcome: "not-found" },
+      { mirror: "https://sci-hub.vg", outcome: "found" },
+    ]);
+  });
+
+  it("caps each landing-page request at 20 s even when the caller passes the five-minute download timeout", async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    try {
+      vi.stubGlobal("fetch", vi.fn(async () => htmlResponse(embedPage)));
+      await resolveSciHubPdfUrl("10.1/cap", { timeoutMs: 300_000 });
+      await resolveSciHubPdfUrl("10.1/short", { timeoutMs: 5_000 });
+      expect(timeoutSpy.mock.calls.map((call: unknown[]) => call[0])).toEqual([20_000, 5_000]);
+    } finally {
+      timeoutSpy.mockRestore();
+    }
+  });
+
+  it("reports a thrown fetch error as unavailable with its message", async () => {
+    const productionSleep = __httpTestSeams.sleep;
+    __httpTestSeams.sleep = async () => {}; // fetchWithRetry backs off between attempts on thrown errors
+    try {
+      vi.stubGlobal("fetch", vi.fn(async () => {
+        throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+      }));
+      const probes: SciHubProbe[] = [];
+      const result = await resolveSciHubPdfUrl("10.1/slow", { mirrors: ["https://sci-hub.ee"], onProbe: (probe) => probes.push(probe) });
+      expect(result).toBeUndefined();
+      expect(probes).toEqual([{ mirror: "https://sci-hub.ee", outcome: "unavailable", detail: "timed out" }]);
+    } finally {
+      __httpTestSeams.sleep = productionSleep;
+    }
   });
 });
 

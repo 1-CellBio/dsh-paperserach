@@ -104,6 +104,32 @@ describe("papersearch_download dir confinement", () => {
   });
 });
 
+describe("papersearch_acquire scihub argument", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("rejects a value outside auto/off/only before any network call", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const acquire = toolByName("papersearch_acquire", () => ({ pdfDir: "/unused", useScihub: true }));
+    await expect(
+      acquire.execute({ dois: ["10.1000/fake"], scihub: "second-round" }, execWith()),
+    ).rejects.toThrow(/scihub must be one of auto, off, only/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects only when the installation has useScihub off (fails loud instead of reporting every DOI as a miss)", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const acquire = toolByName("papersearch_acquire", () => ({ pdfDir: "/unused", useScihub: false }));
+    await expect(
+      acquire.execute({ dois: ["10.1000/fake"], scihub: "only" }, execWith()),
+    ).rejects.toThrow(/scihub=only needs the useScihub setting on/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("papersearch_download_scihub dir confinement", () => {
   let base: string;
   beforeEach(async () => {

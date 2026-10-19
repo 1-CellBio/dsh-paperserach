@@ -36,7 +36,7 @@ papersearch_search / papersearch_fetch   ←  21 个学术源（纯 TS 适配器
 | `papersearch_fetch` | 一句话闭环：检索 → 挑选可下载的前 N 篇 → 批量下载进 OKF 源目录，返回逐篇清单 |
 | `papersearch_download` | 按源 + paper_id 精确下载单篇（幂等，已存在则跳过；OA 回退链失败后走 Sci-Hub 末位兜底，`useScihub=false` 可关闭） |
 | `papersearch_download_scihub` | 末位兜底：按 DOI / 标题 / PMID / URL 直接从 Sci-Hub 镜像下载（托管付费墙论文，谨慎使用） |
-| `papersearch_acquire` | 按 DOI 批量获取全文 PDF（Semantic Scholar openAccessPdf → 开放仓库 + unpaywall → Sci-Hub；库内已覆盖的 DOI 直接答 `in-library`），后台作业，逐 DOI 诊断失败原因 |
+| `papersearch_acquire` | 按 DOI 批量获取全文 PDF（Semantic Scholar openAccessPdf → 开放仓库 + unpaywall → Sci-Hub；库内已覆盖的 DOI 直接答 `in-library`），后台作业，逐 DOI 诊断失败原因。`scihub` 参数分两轮用：`off` 只走开放来源（不碰 Sci-Hub），`only` 只走 Sci-Hub（对第一轮失败的 DOI 做第二轮；`useScihub` 关闭时拒绝），默认 `auto` 整条链 |
 | `papersearch_sources` | 列出可用的源连接器 |
 | `papersearch_help` | 使用说明 + 可复制示例提问 |
 
@@ -82,7 +82,7 @@ papersearch_search / papersearch_fetch   ←  21 个学术源（纯 TS 适配器
 
 **易碎源提示**：google_scholar / citeseerx / base / ssrn 属反爬型（验证码、机构 IP 限制），单源失败会出现在 errors map 里，属预期行为；搜索工具会照常返回其余源的结果。
 
-**关于 Sci-Hub**：在开放仓库 + unpaywall 都失败时作为**最后手段**，按序轮换一组内置镜像（`sci-hub.vg/al/mk/ru/...`，借鉴 scansci-pdf 2026-07 实测清单），解析 `<镜像>/<DOI|标题|PMID|URL>` 页面里的 PDF 直链（`src/sources/sci_hub.ts`，纯 TS：meta citation_pdf_url / embed / iframe / button / a + URL 级 plausibility 过滤 + EN/RU 文章不存在 + 空 embed 检测）。会话内按镜像记录成败/延迟并打分排序，刚失败的镜像几分钟内排后，避免反复撞墙。Sci-Hub 分发的是未经出版商授权的受版权保护论文，仅建议对确实付费墙且必须获取的论文使用；`useScihub=false`（或 `PAPERSEARCH_USE_SCI_HUB=false`）可关闭，`scihubBaseUrl` 支持逗号分隔自定义镜像列表。`papersearch_download_scihub` 提供单次显式下载入口。
+**关于 Sci-Hub**：在开放仓库 + unpaywall 都失败时作为**最后手段**，按序轮换一组内置镜像（`sci-hub.ee/ru/se/vg/al/mk`：前三个取自批量下载工作流的实测优先级，后三个借鉴 scansci-pdf 2026-07 实测清单；镜像可达性因网络而异，用 `scihubBaseUrl` 覆盖），解析 `<镜像>/<DOI|标题|PMID|URL>` 页面里的 PDF 直链（`src/sources/sci_hub.ts`，纯 TS：meta citation_pdf_url / embed / iframe / button / a + URL 级 plausibility 过滤 + EN/RU 文章不存在 + 空 embed 检测）。会话内按镜像记录成败/延迟并打分排序，刚失败的镜像几分钟内排后，避免反复撞墙。Sci-Hub 分发的是未经出版商授权的受版权保护论文，仅建议对确实付费墙且必须获取的论文使用；`useScihub=false`（或 `PAPERSEARCH_USE_SCI_HUB=false`）可关闭，`scihubBaseUrl` 支持逗号分隔自定义镜像列表。`papersearch_download_scihub` 提供单次显式下载入口。
 
 ## 兼容性
 
@@ -151,7 +151,7 @@ PAPERSEARCH_PDF_DIR=/absolute/dir         # 覆盖下载目录
 
 **Google Scholar 代理**：`http://`（含 Clash/V2Ray 混合端口）或 `socks5://`（ssh -D 等）正向代理均可；https 目标走 CONNECT 隧道，http 目标走绝对 URI 转发，SOCKS5 按 RFC 1928 无鉴权握手（零依赖实现，见 `src/proxy.ts`）。
 
-HTTP 层内置：礼貌 UA、超时、429/5xx 指数退避重试（Retry-After 优先）、AbortSignal 传播；下载校验 PDF 魔数防 HTML 误存。
+HTTP 层内置：礼貌 UA、超时、429/5xx 指数退避重试（Retry-After 优先）、AbortSignal 传播；下载校验 PDF 魔数防 HTML 误存。`papersearch_acquire` 的 Semantic Scholar DOI 查询按 host 限速（无 key 间隔 0.4 s，有 key 1.1 s），并发的 DOI 不会挤成一簇触发 429。Sci-Hub 一步逐镜像记录应答：镜像说「文章不存在」才算 `none`；全部镜像无应答（HTTP 错误、超时、验证页）记为 `unavailable`（诊断 `inconclusive`，提示改 `scihubBaseUrl`），不当成「镜像没有这篇」。
 
 ## 示例
 

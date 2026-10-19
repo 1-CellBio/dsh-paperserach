@@ -5,7 +5,7 @@ import path from "node:path";
 import "./kinds";
 import { sciHubEnabled } from "./keys";
 import { LineLog } from "./log-buffer";
-import { acquireByDoi, downloadAll, pickDownloadable, searchSources, type DownloadOutcome } from "./registry";
+import { acquireByDoi, downloadAll, pickDownloadable, searchSources, type DownloadOutcome, type SciHubMode } from "./registry";
 import { ingestDetailClause, stagedFiles, type IngestHandoff } from "./staging";
 
 /** Start one papersearch background job through the ctx.jobs seam.
@@ -226,6 +226,8 @@ export interface AcquireJobArgs {
   /** Absolute download dir. */
   dir: string;
   downloadTimeoutMs: number;
+  /** Sci-Hub use for this run; the tools layer resolves the default (`auto`) and rejects `only` when `useScihub` is off. */
+  sciHub: SciHubMode;
 }
 
 /** The acquire manifest shared by the synchronous tool result and the job detail. */
@@ -235,8 +237,16 @@ export interface AcquireJobResult {
   dir: string;
 }
 
+/** The chain a run consults, as the job log states it. */
+function acquireChainLine(mode: SciHubMode): string {
+  if (mode === "only") return "sci-hub only (scihub=only)";
+  if (mode === "off") return "semantic-scholar → oa-repositories/unpaywall; sci-hub skipped (scihub=off)";
+  return `semantic-scholar → oa-repositories/unpaywall${sciHubEnabled() ? " → sci-hub" : "; sci-hub off"}`;
+}
+
 /** DOI acquisition pipeline behind papersearch_acquire: S2 openAccessPdf →
- *  OA repositories + unpaywall → Sci-Hub (unless `useScihub` is turned off), one log line per settled DOI. */
+ *  OA repositories + unpaywall → Sci-Hub (unless `useScihub` is turned off or the run's `sciHub` mode skips it;
+ *  `only` runs Sci-Hub alone), one log line per settled DOI. */
 export async function runAcquireJob(
   args: AcquireJobArgs,
   refreshKeys: () => Promise<void>,
@@ -245,9 +255,10 @@ export async function runAcquireJob(
 ): Promise<AcquireJobResult> {
   await refreshKeys();
   throwIfAborted(signal);
-  log.append(`acquire ${args.dois.length} DOI(s) into ${args.dir} (chain: semantic-scholar → oa-repositories/unpaywall${sciHubEnabled() ? " → sci-hub" : "; sci-hub off"})`);
+  log.append(`acquire ${args.dois.length} DOI(s) into ${args.dir} (chain: ${acquireChainLine(args.sciHub)})`);
   const results = await acquireByDoi(args.dois, {
     dir: args.dir,
+    sciHub: args.sciHub,
     signal,
     timeoutMs: args.downloadTimeoutMs,
     onOutcome: (outcome) => {

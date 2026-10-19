@@ -8,13 +8,18 @@ import { absoluteUrl, attrValue, decodeHtmlEntities, stripTags } from "../html";
  * store — a mirror that just failed is de-prioritized for a few minutes so
  * repeated lookups stop hammering the same dead host. */
 
-/** Curated mirror list (2026-07 scansci-pdf measurements) — first one wins
- * until its health says otherwise. */
+/** Default mirror rotation — first one wins until its health says otherwise.
+ * .ee, .ru and .se lead (the order a batch-download workflow reports as
+ * fastest and most complete); .vg, .al and .mk come from the 2026-07
+ * scansci-pdf measurements. Mirror reachability depends on the network, so the
+ * scihubBaseUrl setting overrides this list. */
 export const DEFAULT_SCIHUB_MIRRORS: readonly string[] = [
+  "https://sci-hub.ee",
+  "https://sci-hub.ru",
+  "https://sci-hub.se",
   "https://sci-hub.vg",
   "https://sci-hub.al",
   "https://sci-hub.mk",
-  "https://sci-hub.ru",
 ];
 
 const DIRECT = "direct";
@@ -31,6 +36,11 @@ interface MirrorHealth {
 }
 
 const PENALTY_MS = 3 * 60_000;
+
+/** Cap for one landing-page request. Callers pass the PDF download timeout
+ * (five minutes by default); a mirror that never answers must not hold a DOI
+ * for that long, once per mirror. */
+const LANDING_PAGE_TIMEOUT_MS = 20_000;
 const health = new Map<string, MirrorHealth>();
 
 /** Test seam: forget everything learned this session. */
@@ -171,11 +181,31 @@ export function extractPdfUrl(html: string, baseUrl: string): string {
   return "";
 }
 
+/** What one mirror answered for one identifier. `not-found`: the mirror served a
+ * page that says it has no such article. `unavailable`: the mirror said nothing
+ * about the article — a network error, an HTTP error, or a page with neither a
+ * PDF link nor a not-found marker (a challenge page or a changed layout). */
+export interface SciHubProbe {
+  mirror: string;
+  outcome: "found" | "not-found" | "unavailable";
+  detail?: string;
+}
+
 export interface ResolveSciHubOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
   /** Explicit rotation override (used by papersearch_download_scihub --baseUrl). */
   mirrors?: string[];
+  /** Called once per mirror tried, so a caller can tell "the mirrors do not
+   * have this paper" from "no mirror answered". */
+  onProbe?: (probe: SciHubProbe) => void;
+}
+
+function describeMirrorError(error: unknown): string {
+  const name = error instanceof Error ? error.name : "";
+  if (name === "TimeoutError" || name === "AbortError") return "timed out";
+  const message = error instanceof Error ? error.message : String(error);
+  return message.length > 80 ? `${message.slice(0, 77)}...` : message;
 }
 
 export interface ResolvedSciHubPdf {
@@ -206,21 +236,27 @@ export async function resolveSciHubPdfUrl(
       const response = await fetchWithRetry(`${mirror}/${id}`, {
         headers: { "User-Agent": UA, Accept: "text/html,*/*" },
         signal: options.signal,
-        timeoutMs: options.timeoutMs ?? 20_000,
+        timeoutMs: Math.min(options.timeoutMs ?? LANDING_PAGE_TIMEOUT_MS, LANDING_PAGE_TIMEOUT_MS),
       });
       if (!response.ok) {
         noteFailure(mirror);
+        options.onProbe?.({ mirror, outcome: "unavailable", detail: `HTTP ${response.status}` });
         continue;
       }
       const html = stripScripts(await response.text());
       const url = extractPdfUrl(html, mirror);
       if (url) {
         noteSuccess(mirror, Date.now() - startedAt);
+        options.onProbe?.({ mirror, outcome: "found" });
         return { url, mirror };
       }
       noteFailure(mirror);
-    } catch {
+      options.onProbe?.(isNotFoundPage(html)
+        ? { mirror, outcome: "not-found" }
+        : { mirror, outcome: "unavailable", detail: "page has neither a PDF link nor a not-found marker" });
+    } catch (error) {
       noteFailure(mirror);
+      options.onProbe?.({ mirror, outcome: "unavailable", detail: describeMirrorError(error) });
     }
   }
   return undefined;

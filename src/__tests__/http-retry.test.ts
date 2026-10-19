@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { getJson, HttpError, __httpTestSeams } from "../http.ts";
+import { getJson, HttpError, paceRequests, __httpTestSeams } from "../http.ts";
 
 /**
  * 429 退避回归（2026-09-21）：真实 run 里 S2/OpenAlex 无 key 限流是分钟级
@@ -94,5 +94,54 @@ describe("http 429 cooldown", () => {
     const before = calls;
     await expect(getJson("https://api.crossref.org/works?q=2")).resolves.toEqual({ ok: true });
     expect(calls).toBe(before + 1);
+  });
+});
+
+describe("paceRequests", () => {
+  let fakeNow: number;
+  const sleeps: number[] = [];
+
+  beforeEach(() => {
+    fakeNow = 5_000_000;
+    sleeps.length = 0;
+    __httpTestSeams.sleep = async (ms: number) => {
+      sleeps.push(ms);
+    };
+    __httpTestSeams.now = () => fakeNow;
+  });
+  afterEach(() => {
+    __httpTestSeams.sleep = (ms, signal) => new Promise((resolve, reject) => {
+      const timer = setTimeout(resolve, ms);
+      signal?.addEventListener("abort", () => {
+        clearTimeout(timer);
+        reject(new Error("aborted"));
+      }, { once: true });
+    });
+    __httpTestSeams.now = () => Date.now();
+    __httpTestSeams.resetPacing();
+  });
+
+  it("并发调用按序占用间隔槽：首个即刻放行，其后每个多等一个间隔", async () => {
+    await Promise.all([
+      paceRequests("https://pace-a.example/x", 400),
+      paceRequests("https://pace-a.example/y", 400),
+      paceRequests("https://pace-a.example/z", 400),
+    ]);
+    expect(sleeps).toEqual([400, 800]);
+  });
+
+  it("间隔已过则不等；不同 host 互不占槽", async () => {
+    await paceRequests("https://pace-b.example/1", 400);
+    fakeNow += 400;
+    await paceRequests("https://pace-b.example/2", 400);
+    await paceRequests("https://pace-c.example/1", 400);
+    expect(sleeps).toEqual([]);
+  });
+
+  it("间隔内的后一次只补足剩余时间", async () => {
+    await paceRequests("https://pace-d.example/1", 400);
+    fakeNow += 150;
+    await paceRequests("https://pace-d.example/2", 400);
+    expect(sleeps).toEqual([250]);
   });
 });
